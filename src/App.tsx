@@ -12,11 +12,11 @@ type Person = {
   lastPairKey?: string;
 };
 type Room = {
-  id: string;      // e.g. N203
-  form?: string;   // e.g. 9MY
-  building: string;// N
-  number: number;  // 203
-  floor: number;   // 2
+  id: string;      // e.g. N102
+  form?: string;   // e.g. 9AG
+  building: string;
+  number: number;
+  floor: number;
   enabled: boolean;
 };
 type Slot = { id: string; rooms: string[] };
@@ -29,13 +29,7 @@ type RosterJson = {
 
 // ---------- Utils ----------
 const uid = () => Math.random().toString(36).slice(2, 10);
-const expectedLabels = new Set([
-  "Academia","Art","Charity","Community","Media","Music","Sports","Theatre",
-  "Blue House Captain","Green House Captain","Red House Captain","Yellow House Captain","no need"
-]);
-const isDeptWord = (s?: string) => !!s && expectedLabels.has(s);
 
-// room parser
 function parseRoomId(raw: string): { building: string; number: number; floor: number } | null {
   const m = raw.trim().match(/^([A-Za-z]+)(\d{3})$/);
   if (!m) return null;
@@ -44,12 +38,9 @@ function parseRoomId(raw: string): { building: string; number: number; floor: nu
   const floor = parseInt(m[2][0], 10);
   return { building, number, floor };
 }
-// N10几 代号
-const aliasCode = (r: Room) => `${r.building}${r.floor}0几`;
-// pair key
 const pairKey = (a: string, b: string) => [a, b].sort().join("+");
 
-// RotaCode (保持不变，上一轮只用一条)
+// ---- RotaCode(上一轮) 压缩/校验 ----
 function crc32(str: string) {
   let c = ~0; for (let i=0;i<str.length;i++){ c^=str.charCodeAt(i); for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); }
   return (~c)>>>0;
@@ -61,18 +52,16 @@ async function decompressUTF8(u8: Uint8Array){ if((globalThis as any).Decompress
 async function packRotaCode(payload:any){ const json=JSON.stringify(payload); const comp=await compressUTF8(json); const b64=toBase64URL(comp); const crc=crc32(b64).toString(16).toUpperCase().padStart(8,"0"); return `ROTAv1.${b64}.${crc}`;}
 async function unpackRotaCode(code:string){ if(!code.startsWith("ROTAv1.")) throw new Error("Bad version"); const parts=code.split("."); if(parts.length<3) throw new Error("Malformed code"); const b64=parts.at(1)!; const crc=parts.at(2)!; const calc=crc32(b64).toString(16).toUpperCase().padStart(8,"0"); if(calc!==crc) throw new Error("CRC mismatch"); const u8=fromBase64URL(b64); const json=await decompressUTF8(u8); return JSON.parse(json); }
 
-// ---------- Data loading (from /roster.json) ----------
+// ---------- Load roster ----------
 async function loadRoster(): Promise<{people: Person[]; rooms: Room[]; deptColors: Record<string,string>}> {
   const res = await fetch("/roster.json");
   if (!res.ok) throw new Error("roster.json not found");
   const j: RosterJson = await res.json();
 
-  const deptColors: Record<string,string> = j.deptColors || {};
-
   const people: Person[] = j.people.map(p => ({
     id: uid(),
     name: p.name,
-    dept: isDeptWord(p.dept) ? p.dept : undefined,
+    dept: p.dept,          // 接受任何部门名
     active: true,
     assignedCount: 0
   })).sort((a,b)=>a.name.localeCompare(b.name));
@@ -83,7 +72,7 @@ async function loadRoster(): Promise<{people: Person[]; rooms: Room[]; deptColor
     return { id: rr.id, form: rr.form, building: parsed.building, number: parsed.number, floor: parsed.floor, enabled: true };
   }).sort((a,b)=> a.building===b.building ? (a.floor===b.floor ? a.number-b.number : a.floor-b.floor) : a.building.localeCompare(b.building));
 
-  return { people, rooms, deptColors };
+  return { people, rooms, deptColors: j.deptColors || {} };
 }
 
 // ---------- Matching ----------
@@ -94,14 +83,16 @@ function makeCost(p: Person, slot: Slot, strong=true): number {
     if (slot.rooms.length===2 && p.lastPairKey === pairKey(slot.rooms[0],slot.rooms[1])) return 1e6; // 连续同房对禁止
   }
   let c = 0;
-  for (const r of slot.rooms) if (last.has(r)) c += 100;   // 软惩罚
-  if (slot.rooms.length===2 && p.lastPairKey === pairKey(slot.rooms[0],slot.rooms[1])) c += 200;
+  for (const r of slot.rooms) if (last.has(r)) c += 100;   // 软惩罚（上一轮同房）
+  if (slot.rooms.length===2 && p.lastPairKey === pairKey(slot.rooms[0],slot.rooms[1])) c += 200; // 软惩罚（上一轮同房对）
   c += p.assignedCount * 5; // 公平性
   return c;
 }
-function greedyAdjacentPairs(rooms: Room[], need: number): Slot[] {
+
+// 相邻优先的贪心配对
+function greedyAdjacentPairs(rooms: Room[], need: number, used: Set<string>): Slot[] {
   const sorted = rooms.slice().sort((a,b)=> a.building===b.building ? (a.floor===b.floor ? a.number-b.number : a.floor-b.floor) : a.building.localeCompare(b.building));
-  const used = new Set<string>(); const pairs: Slot[] = [];
+  const pairs: Slot[] = [];
   for (let i=0;i<sorted.length-1 && pairs.length<need;i++){
     const a=sorted[i], b=sorted[i+1];
     if (used.has(a.id)||used.has(b.id)) continue;
@@ -111,6 +102,32 @@ function greedyAdjacentPairs(rooms: Room[], need: number): Slot[] {
   }
   return pairs;
 }
+
+// 不足相邻对时，用“最近邻距离”补足配对（同楼同层优先）
+function distance(a: Room, b: Room): number {
+  if (a.building !== b.building) return 1e9 + Math.abs(a.number-b.number);
+  const floorPenalty = Math.abs(a.floor - b.floor) * 1000; // 楼层差距重罚
+  return floorPenalty + Math.abs(a.number - b.number);
+}
+function fillPairsByNearest(rooms: Room[], need: number, used: Set<string>): Slot[] {
+  const candidates: {a: Room; b: Room; d: number}[] = [];
+  const free = rooms.filter(r=>!used.has(r.id));
+  for (let i=0;i<free.length;i++){
+    for (let j=i+1;j<free.length;j++){
+      candidates.push({ a: free[i], b: free[j], d: distance(free[i], free[j]) });
+    }
+  }
+  candidates.sort((x,y)=>x.d-y.d);
+  const picked: Slot[] = [];
+  for (const c of candidates){
+    if (picked.length >= need) break;
+    if (used.has(c.a.id) || used.has(c.b.id)) continue;
+    picked.push({ id: pairKey(c.a.id, c.b.id), rooms: [c.a.id, c.b.id] });
+    used.add(c.a.id); used.add(c.b.id);
+  }
+  return picked;
+}
+
 function hungarianAssign(people: Person[], slots: Slot[]): Assignment[] {
   const P = people.length, S = slots.length, N = Math.max(P,S);
   const M: number[][] = Array.from({length:N},()=>Array(N).fill(0));
@@ -129,20 +146,52 @@ function hungarianAssign(people: Person[], slots: Slot[]): Assignment[] {
   for (const [ri,cj] of idxs) if (ri<P && cj<S) out.push({ person: people[ri].name, rooms: slots[cj].rooms.slice() });
   return out;
 }
+
+// 生成：保证“房间必有人”
 function generateAssignment(peopleIn: Person[], roomsIn: Room[]): Assignment[] {
   const people = peopleIn.filter(p=>p.active);
-  const rooms  = roomsIn.filter(r=>r.enabled);
-  if (!people.length || !rooms.length) return [];
-  const R = rooms.length, P = people.length;
-  const D = R>P ? (R-P) : 0; // 需要的双房位数量
-  const pairs = greedyAdjacentPairs(rooms, D);
-  const used = new Set<string>(pairs.flatMap(p=>p.rooms));
-  const singles: Slot[] = rooms.filter(r=>!used.has(r.id)).map(r=>({id:r.id, rooms:[r.id]}));
-  const slots: Slot[] = [...pairs, ...singles];
-  return hungarianAssign(people, slots);
+  const enabledRooms  = roomsIn.filter(r=>r.enabled);
+  if (!people.length || !enabledRooms.length) return [];
+
+  const R = enabledRooms.length, P = people.length;
+  // 目标：令 slot 数量 = min(R, P)；如果 R > P，需要 D 个二班；如果 P >= R，则所有房间都是单房位。
+  const D = Math.max(0, R - P);
+
+  // 先用“相邻”造对，不够再用“最近邻”补齐，确保 pairs.length === D
+  const used = new Set<string>();
+  const pairs1 = greedyAdjacentPairs(enabledRooms, D, used);
+  let pairs = pairs1.slice();
+  if (pairs.length < D) {
+    const extra = fillPairsByNearest(enabledRooms, D - pairs.length, used);
+    pairs = pairs.concat(extra);
+  }
+
+  // singles = 未被成对的房间
+  const singles: Slot[] = enabledRooms.filter(r=>!used.has(r.id)).map(r=>({id:r.id, rooms:[r.id]}));
+  const slots: Slot[] = [...pairs, ...singles]; // 现在 slots 数量 = R - D = min(R, P)
+
+  // Hungarian 分配
+  const base = hungarianAssign(people, slots);
+
+  // 兜底：任何遗漏的房间（极少数边界）也强行分给“当轮最少被用的人”
+  const assignedRooms = new Set(base.flatMap(a=>a.rooms));
+  const still = enabledRooms.filter(r=>!assignedRooms.has(r.id));
+  if (still.length) {
+    const usedBy: Map<string, number> = new Map();
+    for (const a of base) usedBy.set(a.person, (usedBy.get(a.person)||0) + a.rooms.length);
+    const pool = people.slice().sort((a,b)=>(usedBy.get(a.name)||0)-(usedBy.get(b.name)||0));
+    let pi = 0;
+    for (const r of still) {
+      const p = pool[pi % pool.length];
+      base.push({ person: p.name, rooms: [r.id] });
+      usedBy.set(p.name, (usedBy.get(p.name)||0) + 1);
+      pi++;
+    }
+  }
+  return base;
 }
 
-// ---------- UI (two-step wizard) ----------
+// ---------- UI ----------
 export default function App(){
   // data
   const [loaded, setLoaded] = useState(false);
@@ -154,7 +203,7 @@ export default function App(){
   const [title, setTitle] = useState("Morning Announcement Rota — SUIS GB");
   const [dateStr, setDateStr] = useState(()=>new Date().toISOString().slice(0,10));
   const [rotaCodeIn, setRotaCodeIn] = useState("");
-  const [allowedGrades, setAllowedGrades] = useState<Set<string>>(new Set());
+  const [allowedForms, setAllowedForms] = useState<Set<string>>(new Set());
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const boardRef = useRef<HTMLDivElement>(null);
 
@@ -164,9 +213,8 @@ export default function App(){
       setDeptColors(deptColors);
       setPeople(people);
       setRooms(rooms);
-      // init grades
-      const grades = Array.from(new Set(rooms.map(r=>(r.form?.match(/^(\d{1,2})/)?.[1] ?? ""))).values()).filter(Boolean).sort((a,b)=>+a-+b);
-      setAllowedGrades(new Set(grades));
+      const forms = Array.from(new Set(rooms.map(r=> r.form || ""))).filter(Boolean).sort();
+      setAllowedForms(new Set(forms));
       setLoaded(true);
     }).catch(e=>{
       console.error(e);
@@ -176,7 +224,7 @@ export default function App(){
 
   // apply last rota code (上一轮)
   useEffect(()=>{
-    if (!rotaCodeIn.trim()) return;
+    if (!rotaCodeIn.trim() || !people.length) return;
     (async ()=>{
       try{
         const ro = await unpackRotaCode(rotaCodeIn.trim());
@@ -189,12 +237,12 @@ export default function App(){
       }catch(e){ console.warn("Rota code invalid:", e); }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rotaCodeIn]);
+  }, [rotaCodeIn, people.length]);
 
   // derived filtered rooms
   const filteredRooms = useMemo(()=>{
-    return rooms.map(r => ({...r, enabled: r.form ? allowedGrades.has((r.form.match(/^(\d{1,2})/)?.[1] ?? "")) : true}));
-  },[rooms, allowedGrades]);
+    return rooms.map(r => ({...r, enabled: r.form ? allowedForms.has(r.form) : true}));
+  },[rooms, allowedForms]);
 
   // status check
   const statusText = useMemo(()=>{
@@ -204,9 +252,9 @@ export default function App(){
     return `人员: ${activeCount}，房间: ${roomCount}（需 ${needPairs} 位二班）`;
   },[people, filteredRooms]);
 
-  function toggleGrade(g: string){
-    setAllowedGrades(prev => {
-      const n = new Set(prev); if (n.has(g)) n.delete(g); else n.add(g); return n;
+  function toggleForm(form: string){
+    setAllowedForms(prev => {
+      const n = new Set(prev); if (n.has(form)) n.delete(form); else n.add(form); return n;
     });
   }
   function togglePerson(id: string){
@@ -236,20 +284,17 @@ export default function App(){
     alert("已复制排布码：\n\n" + code);
   }
 
-  // --- Render ---
-  if (!loaded) return <div className="min-h-screen flex items-center justify-center text-gray-500">Loading roster…</div>;
+  if (!loaded) return <div className="min-h-screen flex items-center justify-center text-neutral-400">Loading roster…</div>;
 
-  // forms/grades
-  const grades = Array.from(new Set(rooms.map(r=>(r.form?.match(/^(\d{1,2})/)?.[1] ?? ""))).values()).filter(Boolean).sort((a,b)=>+a-+b);
+  const allForms = Array.from(new Set(rooms.map(r=> r.form || ""))).filter(Boolean).sort();
 
   return (
     <div className="min-h-screen bg-black text-white">
-      {/* Step header */}
       <div className="max-w-6xl mx-auto p-4">
         <div className="text-2xl font-bold">{step===1 ? "准备界面" : "成品界面"}</div>
       </div>
 
-      {/* STEP 1: 准备界面 */}
+      {/* STEP 1 */}
       {step===1 && (
         <div className="max-w-6xl mx-auto p-4">
           <div className="bg-neutral-900 rounded-2xl p-4">
@@ -263,7 +308,7 @@ export default function App(){
             {/* 状态条 */}
             <div className="mt-3 text-sm text-neutral-400">{statusText}</div>
 
-            {/* 人员选择 & 年级选择 */}
+            {/* 人员选择 & Form 选择 */}
             <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* 人员 */}
               <div className="bg-neutral-800 rounded-xl p-3">
@@ -273,19 +318,18 @@ export default function App(){
                     <label key={p.id} className="flex items-center gap-2 py-1">
                       <input type="checkbox" checked={p.active} onChange={()=>togglePerson(p.id)} />
                       <span>{p.name}</span>
-                      {p.dept && deptColors[p.dept] && <span className="ml-auto w-3 h-3 rounded" style={{background: deptColors[p.dept]}}/>}
                     </label>
                   ))}
                 </div>
               </div>
-              {/* 年级 */}
+              {/* Form */}
               <div className="bg-neutral-800 rounded-xl p-3">
-                <div className="font-semibold mb-2">年级选择</div>
+                <div className="font-semibold mb-2">班级（Form）选择</div>
                 <div className="flex flex-wrap gap-2">
-                  {grades.map(g=>(
-                    <button key={g} onClick={()=>toggleGrade(g)}
-                      className={(allowedGrades.has(g) ? "bg-emerald-600" : "bg-neutral-700") + " px-3 py-1.5 rounded-full text-sm"}>
-                      {g}
+                  {allForms.map(f=>(
+                    <button key={f} onClick={()=>toggleForm(f)}
+                      className={(allowedForms.has(f) ? "bg-emerald-600" : "bg-neutral-700") + " px-3 py-1.5 rounded-full text-sm"}>
+                      {f}
                     </button>
                   ))}
                 </div>
@@ -299,7 +343,7 @@ export default function App(){
         </div>
       )}
 
-      {/* STEP 2: 成品界面 */}
+      {/* STEP 2 */}
       {step===2 && (
         <div className="max-w-6xl mx-auto p-4">
           <div ref={boardRef} className="bg-white text-black rounded-2xl p-4">
@@ -319,35 +363,31 @@ export default function App(){
               <table className="w-full border border-gray-300">
                 <thead>
                   <tr className="bg-gray-100">
-                    <th className="p-2 border">年级</th>
-                    <th className="p-2 border">代号 + 房号</th>
+                    <th className="p-2 border">班级 + 房号</th>
                     <th className="p-2 border">部门 + 姓名</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredRooms
-                    .filter(r=>r.enabled)
+                  {rooms
+                    .filter(r=> filteredRooms.find(fr=>fr.id===r.id)?.enabled )
                     .sort((a,b)=>{
-                      const ga=(a.form?.match(/^(\d{1,2})/)?.[1] ?? "99");
-                      const gb=(b.form?.match(/^(\d{1,2})/)?.[1] ?? "99");
-                      if (ga!==gb) return (+ga)-(+gb);
+                      const fa=a.form||"zzz", fb=b.form||"zzz";
+                      if (fa!==fb) return fa.localeCompare(fb);
                       if (a.building!==b.building) return a.building.localeCompare(b.building);
                       if (a.floor!==b.floor) return a.floor-b.floor;
                       return a.number-b.number;
                     })
                     .map(r=>{
                       const a = assignments.find(x=>x.rooms.includes(r.id));
-                      const grade = r.form?.match(/^(\d{1,2})/)?.[1] ?? "";
-                      const code = `${aliasCode(r)} / ${r.id}`;
+                      const formRoom = r.form ? `${r.form} ${r.id}` : r.id;
                       const dept = a ? people.find(p=>p.name===a.person)?.dept : undefined;
-                      const color = dept && deptColors[dept] ? deptColors[dept] : undefined;
                       return (
                         <tr key={r.id}>
-                          <td className="p-2 border text-center">{grade}</td>
-                          <td className="p-2 border">{code}</td>
+                          <td className="p-2 border">{formRoom}</td>
                           <td className="p-2 border">
-                            {dept && <span className="inline-block w-3 h-3 mr-2 align-middle rounded" style={{background: color}}/>}
-                            <span className="align-middle">{dept ? `${dept} ` : ""}{a ? a.person : "未分配"}</span>
+                            <span className="align-middle">
+                              {dept ? `${dept} ` : ""}{a?.person ?? "" /* 一定会分配，兜底逻辑已保证 */}
+                            </span>
                           </td>
                         </tr>
                       );
