@@ -1,0 +1,277 @@
+{
+  "people": [
+    {
+      "name": "Cindy Jing",
+      "dept": "Academia"
+    },
+    {
+      "name": "Donny Zhang",
+      "dept": "Academia"
+    },
+    {
+      "name": "Amber Wang",
+      "dept": "Charity"
+    },
+    {
+      "name": "Judy Wang",
+      "dept": "Charity"
+    },
+    {
+      "name": "Tracy Zhuang",
+      "dept": "Charity"
+    },
+    {
+      "name": "Aaren Liu",
+      "dept": "Community"
+    },
+    {
+      "name": "Minju Rhee",
+      "dept": "Community"
+    },
+    {
+      "name": "Daisy Jiang",
+      "dept": "Community"
+    },
+    {
+      "name": "Andrew Chen",
+      "dept": "Media"
+    },
+    {
+      "name": "Isabella Dong",
+      "dept": "Media"
+    },
+    {
+      "name": "Emily Zhang",
+      "dept": "Music"
+    },
+    {
+      "name": "Gavin Gao",
+      "dept": "Music"
+    },
+    {
+      "name": "Alice Wu",
+      "dept": "Theatre"
+    },
+    {
+      "name": "Richard Nairn",
+      "dept": "Theatre"
+    },
+    {
+      "name": "Hepburn He",
+      "dept": "Visual Art"
+    },
+    {
+      "name": "Sophia Hu",
+      "dept": "Visual Art"
+    },
+    {
+      "name": "Trey Bhudri",
+      "dept": "Red HC"
+    },
+    {
+      "name": "Nina Zhang",
+      "dept": "Red HC"
+    },
+    {
+      "name": "David Shen",
+      "dept": "Blue HC"
+    },
+    {
+      "name": "Elsa Tang",
+      "dept": "Blue HC"
+    },
+    {
+      "name": "Cynthia Zhu",
+      "dept": "Green HC"
+    },
+    {
+      "name": "Cynthia Yao",
+      "dept": "Green HC"
+    },
+    {
+      "name": "Eason Yuan",
+      "dept": "Yellow HC"
+    },
+    {
+      "name": "Michelle Liu",
+      "dept": "Yellow HC"
+    },
+    {
+      "name": "Rebecca Hou",
+      "dept": "Sports"
+    },
+    {
+      "name": "John Tay",
+      "dept": "Sports"
+    }
+  ],
+  "rooms": [
+    {
+      "id": "N203",
+      "form": "9MY"
+    },
+    {
+      "id": "N201",
+      "form": "9LDW"
+    },
+    {
+      "id": "N202",
+      "form": "9KW"
+    },
+    {
+      "id": "N207",
+      "form": "9FF"
+    },
+    {
+      "id": "N206",
+      "form": "9SS"
+    },
+    {
+      "id": "N205",
+      "form": "9FN"
+    },
+    {
+      "id": "N102",
+      "form": "9CC"
+    },
+    {
+      "id": "N103",
+      "form": "9QF"
+    },
+    {
+      "id": "N101",
+      "form": "9HP"
+    },
+    {
+      "id": "N107",
+      "form": "9RA"
+    },
+    {
+      "id": "N209",
+      "form": "9AG"
+    },
+    {
+      "id": "N105",
+      "form": "9GL"
+    },
+    {
+      "id": "N401",
+      "form": "10CF"
+    },
+    {
+      "id": "N402",
+      "form": "10NW"
+    },
+    {
+      "id": "N403",
+      "form": "10NZ"
+    },
+    {
+      "id": "N405",
+      "form": "10HC"
+    },
+    {
+      "id": "N406",
+      "form": "10BT"
+    },
+    {
+      "id": "N407",
+      "form": "10KM"
+    },
+    {
+      "id": "N301",
+      "form": "10TW"
+    },
+    {
+      "id": "N302",
+      "form": "10AG"
+    },
+    {
+      "id": "N303",
+      "form": "10HJ"
+    },
+    {
+      "id": "N305",
+      "form": "10HZ"
+    },
+    {
+      "id": "N306",
+      "form": "10PT"
+    },
+    {
+      "id": "N307",
+      "form": "10PA"
+    },
+    {
+      "id": "C307",
+      "form": "11BUR"
+    },
+    {
+      "id": "C305",
+      "form": "11PB"
+    },
+    {
+      "id": "C302",
+      "form": "11MF"
+    },
+    {
+      "id": "C204",
+      "form": "11SED"
+    },
+    {
+      "id": "N309",
+      "form": "11DD"
+    },
+    {
+      "id": "C203",
+      "form": "11EZ"
+    },
+    {
+      "id": "C102",
+      "form": "11TT"
+    },
+    {
+      "id": "C105",
+      "form": "11AS"
+    },
+    {
+      "id": "S405",
+      "form": "12CM"
+    },
+    {
+      "id": "S402",
+      "form": "12JM"
+    },
+    {
+      "id": "S406",
+      "form": "12LM"
+    },
+    {
+      "id": "S301",
+      "form": "12NP"
+    },
+    {
+      "id": "S407",
+      "form": "12NU"
+    },
+    {
+      "id": "S306",
+      "form": "12WY"
+    },
+    {
+      "id": "S404",
+      "form": "12SUE"
+    },
+    {
+      "id": "S401",
+      "form": "12VK"
+    }
+  ],
+  "deptColors": {
+    "Community": "#C9FF00",
+    "Sports": "#FF9300",
+    "Theatre": "#62FFFF",
+    "Red House Captain": "#FF0000",
+    "Yellow House Captain": "#FFFF00"
+  }
+}
