@@ -45,7 +45,10 @@ const I18N: Record<Lang, any> = {
     formSel: "班级（Form）选择",
     next: "下一步",
     back: "返回",
-    exportJPG: "导出 JPG",
+    exportJPG: "下载 JPG",
+    copyJPG: "复制 JPG",
+    copyJPGOk: "JPG 已复制",
+    copyJPGFail: "当前浏览器不支持复制 JPG，请改用“下载 JPG”",
     codeBoxTitle: "排布码（已生成，粘贴到下一轮以避免重复）",
     copy: "复制",
     copyOk: "排布码已复制",
@@ -54,9 +57,7 @@ const I18N: Record<Lang, any> = {
     importFail: "排布码无效或不兼容",
     colFormRoom: "班级 + 房号",
     colNameDept: "姓名 + 部门",
-    language: "语言/Language",
-    languageZh: "中文",
-    languageEn: "English",
+    languageLabel: "语言/Language",
   },
   en: {
     setup: "Setup",
@@ -70,7 +71,10 @@ const I18N: Record<Lang, any> = {
     formSel: "Forms",
     next: "Next",
     back: "Back",
-    exportJPG: "Export JPG",
+    exportJPG: "Download JPG",
+    copyJPG: "Copy JPG",
+    copyJPGOk: "JPG copied",
+    copyJPGFail: "Clipboard image not supported, please use Download JPG",
     codeBoxTitle: "Rota Code (paste next time to avoid repeats)",
     copy: "Copy",
     copyOk: "Rota code copied",
@@ -79,9 +83,7 @@ const I18N: Record<Lang, any> = {
     importFail: "Invalid or incompatible rota code",
     colFormRoom: "Class + Room",
     colNameDept: "Name + Department",
-    language: "语言/Language",
-    languageZh: "中文",
-    languageEn: "English",
+    languageLabel: "语言/Language",
   },
 };
 
@@ -100,7 +102,7 @@ function parseRoomId(raw: string): { building: string; number: number; floor: nu
 }
 const pairKey = (a: string, b: string) => [a, b].sort().join("+");
 
-// 简单可复现的伪随机
+// 简单可复现的伪随机（用于无排布码时“打乱 + 轻微抖动”）
 function makeRNG(seed: number) {
   let s = seed >>> 0;
   return () => {
@@ -177,13 +179,11 @@ async function unpackRotaCodeCompat(code: string) {
   const crc = parts[2];
   const calc = crc32(b64).toString(16).toUpperCase().padStart(8, "0");
   if (calc !== crc) throw new Error("CRC mismatch");
-
   // try plain (no compression)
   try {
     const raw = new TextDecoder().decode(fromBase64URL(b64));
     return JSON.parse(raw);
   } catch {}
-
   // try native inflate if available
   if ((globalThis as any).DecompressionStream) {
     const u8 = fromBase64URL(b64);
@@ -203,14 +203,13 @@ async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
   if (!res.ok) throw new Error("roster.json not found");
   const j: RosterJson = await res.json();
 
-  const people: Person[] = j.people
-    .map((p) => ({
-      id: uid(),
-      name: p.name,
-      dept: p.dept,
-      active: true,
-      assignedCount: 0,
-    }));
+  const people: Person[] = j.people.map((p) => ({
+    id: uid(),
+    name: p.name,
+    dept: p.dept,
+    active: true,
+    assignedCount: 0,
+  }));
 
   const rooms: Room[] = j.rooms.map((rr) => {
     const parsed = parseRoomId(rr.id);
@@ -246,12 +245,9 @@ function makeCost(
   for (const r of slot.rooms) if (last.has(r)) c += 100;
   if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) c += 200;
   c += p.assignedCount * 5;
-
-  // 无历史时加一个极小的“随机抖动”，打破纯字母顺序/固定解
-  if (randJitter) c += Math.floor(randJitter() * 2); // 加 0 或 1，不影响硬性约束
+  if (randJitter) c += Math.floor(randJitter() * 2); // 0/1 抖动打破固定解
   return c;
 }
-
 function greedyAdjacentPairs(rooms: Room[], need: number, used: Set<string>): Slot[] {
   const sorted = rooms.slice().sort((a, b) =>
     a.building === b.building
@@ -294,7 +290,6 @@ function fillPairsByNearest(rooms: Room[], need: number, used: Set<string>): Slo
   }
   return picked;
 }
-
 function hungarianAssign(
   people: Person[],
   slots: Slot[],
@@ -317,7 +312,6 @@ function hungarianAssign(
   for (const [ri, cj] of idxs) if (ri < P && cj < S) out.push({ person: people[ri].name, rooms: slots[cj].rooms.slice() });
   return out;
 }
-
 function generateAssignment(
   peopleIn: Person[],
   roomsIn: Room[],
@@ -328,13 +322,7 @@ function generateAssignment(
   const enabledRooms = roomsIn.filter((r) => r.enabled);
   if (!peopleRaw.length || !enabledRooms.length) return [];
 
-  // 是否先打乱人员顺序（无历史时启用）
-  const people = shufflePeople ? peopleRaw.slice() : peopleRaw.slice();
-  if (shufflePeople && randJitter) {
-    const seedRand = randJitter; // 复用同一 RNG
-    const shuffled = shuffle(people, seedRand);
-    for (let i = 0; i < people.length; i++) people[i] = shuffled[i];
-  }
+  const people = shufflePeople && randJitter ? shuffle(peopleRaw.slice(), randJitter) : peopleRaw.slice();
 
   const R = enabledRooms.length, P = people.length;
   const D = Math.max(0, R - P);
@@ -378,6 +366,16 @@ export default function App() {
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("lang") as Lang) || "zh");
   const L = I18N[lang];
   useEffect(() => { localStorage.setItem("lang", lang); }, [lang]);
+
+  // device detection（iPad 归“电脑”）
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const ua = navigator.userAgent || "";
+    const isiPad = /iPad/i.test(ua) || (navigator.platform === "MacIntel" && (navigator as any).maxTouchPoints > 1);
+    const isAndroidPhone = /Android/i.test(ua) && /Mobile/i.test(ua);
+    const isiPhoneOriPod = /iPhone|iPod/i.test(ua);
+    setIsMobile(!isiPad && (isAndroidPhone || isiPhoneOriPod));
+  }, []);
 
   // data
   const [loaded, setLoaded] = useState(false);
@@ -468,7 +466,7 @@ export default function App() {
   function doGenerate() {
     // 是否存在“上一轮数据”
     const hasHistory = people.some((p) => (p.lastRooms?.length || 0) > 0 || p.lastPairKey);
-    // 无历史：使用随机种子制造“抖动 + 随机顺序”
+    // 无历史：随机
     const seed = randomSeed();
     const rng = makeRNG(seed);
     const randJitter = hasHistory ? null : rng;
@@ -488,15 +486,51 @@ export default function App() {
     });
   }
 
+  // 导出 JPG（下载）
   async function exportJPG() {
     if (!boardRef.current) return;
     const { toJpeg } = await import("html-to-image");
-    const dataUrl = await toJpeg(boardRef.current, { quality: 0.95, pixelRatio: 3, backgroundColor: "#ffffff" });
+    const dataUrl = await toJpeg(boardRef.current, {
+      quality: 0.95,
+      pixelRatio: isMobile ? 2 : 3,
+      backgroundColor: "#ffffff",
+    });
     const link = document.createElement("a");
     link.href = dataUrl;
     link.download = `${title.replace(/\s+/g, "_")}_${dateStr}.jpg`;
     link.click();
   }
+
+  // 复制 JPG 到剪贴板
+  async function copyJPGToClipboard() {
+    if (!boardRef.current) return;
+    const canWrite =
+      !!(navigator as any).clipboard &&
+      typeof (navigator as any).clipboard.write === "function" &&
+      typeof (window as any).ClipboardItem !== "undefined";
+    if (!canWrite) {
+      showToast(L.copyJPGFail);
+      return;
+    }
+    try {
+      const { toJpeg } = await import("html-to-image");
+      const dataUrl = await toJpeg(boardRef.current, {
+        quality: 0.92,
+        pixelRatio: isMobile ? 2 : 3,
+        backgroundColor: "#ffffff",
+      });
+      const res = await fetch(dataUrl);
+      const blob = await res.blob(); // image/jpeg
+      await (navigator as any).clipboard.write([
+        new (window as any).ClipboardItem({ "image/jpeg": blob }),
+      ]);
+      showToast(L.copyJPGOk);
+    } catch (e) {
+      console.warn(e);
+      showToast(L.copyJPGFail);
+    }
+  }
+
   async function copyCode() {
     try {
       await navigator.clipboard.writeText(generatedCode);
@@ -522,6 +556,17 @@ export default function App() {
 
   const allForms = Array.from(new Set(rooms.map((r) => r.form || ""))).filter(Boolean).sort();
 
+  // ======== 根据 isMobile 自适配样式 ========
+  const shellPad = isMobile ? "p-2" : "p-4";
+  const wrapW   = isMobile ? "max-w-full" : "max-w-6xl";
+  const cardPad = isMobile ? "p-3" : "p-4";
+  const headerText = isMobile ? "text-xl" : "text-2xl";
+  const listHeight = isMobile ? "h-[38vh]" : "h-64";
+  const tableText = isMobile ? "text-[12px] leading-tight" : "text-base";
+  const thPad = isMobile ? "p-1.5" : "p-2";
+  const tdPad = isMobile ? "p-1.5" : "p-2";
+  const btnStack = isMobile ? "flex-col" : "flex-row";
+
   return (
     <div className="min-h-screen bg-black text-white">
       {/* Toast */}
@@ -531,21 +576,21 @@ export default function App() {
         </div>
       )}
 
-      <div className="max-w-6xl mx-auto p-4">
-        <div className="flex items-center justify-between">
-          <div className="text-2xl font-bold">{step === 1 ? L.setup : L.result}</div>
+      <div className={`${wrapW} mx-auto ${shellPad}`}>
+        <div className={`flex items-center justify-between ${isMobile ? "mb-2" : "mb-0"}`}>
+          <div className={`${headerText} font-bold`}>{step === 1 ? I18N[lang].setup : I18N[lang].result}</div>
 
           {/* 语言切换（准备界面） */}
           {step === 1 && (
             <div className="flex items-center gap-2">
-              <span className="text-sm text-neutral-400">{L.language}：</span>
+              <span className="text-sm text-neutral-400">{I18N[lang].languageLabel}</span>
               <select
                 value={lang}
                 onChange={(e) => setLang(e.target.value as Lang)}
                 className="bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-sm"
               >
-                <option value="zh">{L.languageZh}</option>
-                <option value="en">{L.languageEn}</option>
+                <option value="zh">中文</option>
+                <option value="en">English</option>
               </select>
             </div>
           )}
@@ -554,43 +599,43 @@ export default function App() {
 
       {/* STEP 1 */}
       {step === 1 && (
-        <div className="max-w-6xl mx-auto p-4">
-          <div className="bg-neutral-900 rounded-2xl p-4">
+        <div className={`${wrapW} mx-auto ${shellPad}`}>
+          <div className={`bg-neutral-900 rounded-2xl ${cardPad}`}>
             {/* 标题 + 日期 + 排布码输入 */}
-            <div className="flex flex-col gap-3 md:flex-row md:items-center">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center">
               <input
-                className="flex-1 rounded px-3 py-2 bg-neutral-800 border border-neutral-700"
-                placeholder={L.titlePh}
+                className={`flex-1 rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isMobile ? "text-sm" : ""}`}
+                placeholder={I18N[lang].titlePh}
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
               />
               <input
                 type="date"
-                className="rounded px-3 py-2 bg-neutral-800 border border-neutral-700"
+                className={`rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isMobile ? "text-sm" : ""}`}
                 value={dateStr}
                 onChange={(e) => setDateStr(e.target.value)}
-                aria-label={L.date}
-                title={L.date}
+                aria-label={I18N[lang].date}
+                title={I18N[lang].date}
               />
               <input
-                className="w-full md:w-[460px] rounded px-3 py-2 bg-neutral-800 border border-neutral-700"
-                placeholder={L.lastCodePh}
+                className={`w-full md:w-[460px] rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isMobile ? "text-sm" : ""}`}
+                placeholder={I18N[lang].lastCodePh}
                 value={rotaCodeIn}
                 onChange={(e) => setRotaCodeIn(e.target.value)}
               />
             </div>
 
             {/* 状态条 */}
-            <div className="mt-3 text-sm text-neutral-400">{statusText}</div>
+            <div className="mt-2 text-sm text-neutral-400">{statusText}</div>
 
             {/* 人员选择 & Form 选择 */}
-            <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className={`mt-3 grid grid-cols-1 ${isMobile ? "gap-3" : "md:grid-cols-3 gap-4"}`}>
               {/* 人员 */}
               <div className="bg-neutral-800 rounded-xl p-3">
-                <div className="font-semibold mb-2">{L.peopleSel}</div>
-                <div className="h-64 overflow-auto divide-y divide-neutral-700">
-                  {/* 展示按名字升序，方便勾选；分配时已使用随机顺序 */}
-                  {people.slice().sort((a,b)=>a.name.localeCompare(b.name)).map((p) => (
+                <div className="font-semibold mb-2">{I18N[lang].peopleSel}</div>
+                <div className={`${listHeight} overflow-auto divide-y divide-neutral-700 ${isMobile ? "text-sm" : ""}`}>
+                  {/* 勾选列表按名字升序；分配时已引入随机 */}
+                  {people.slice().sort((a, b) => a.name.localeCompare(b.name)).map((p) => (
                     <label key={p.id} className="flex items-center gap-2 py-1">
                       <input type="checkbox" checked={p.active} onChange={() => togglePerson(p.id)} />
                       <span>{p.name}</span>
@@ -599,15 +644,15 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Form */}
+              {/* Form（移动端换行按钮更紧凑） */}
               <div className="bg-neutral-800 rounded-xl p-3">
-                <div className="font-semibold mb-2">{L.formSel}</div>
+                <div className="font-semibold mb-2">{I18N[lang].formSel}</div>
                 <div className="flex flex-wrap gap-2">
                   {allForms.map((f) => (
                     <button
                       key={f}
                       onClick={() => toggleForm(f)}
-                      className={(allowedForms.has(f) ? "bg-emerald-600" : "bg-neutral-700") + " px-3 py-1.5 rounded-full text-sm"}
+                      className={`${allowedForms.has(f) ? "bg-emerald-600" : "bg-neutral-700"} ${isMobile ? "px-2 py-1 text-xs" : "px-3 py-1.5 text-sm"} rounded-full`}
                     >
                       {f}
                     </button>
@@ -616,12 +661,12 @@ export default function App() {
               </div>
 
               {/* 下一步 */}
-              <div className="flex items-end">
+              <div className={`flex items-end`}>
                 <button
                   onClick={doGenerate}
-                  className="w-full bg-blue-600 hover:bg-blue-700 rounded-xl py-3 font-semibold"
+                  className={`w-full bg-blue-600 hover:bg-blue-700 rounded-xl ${isMobile ? "py-2 text-sm" : "py-3 font-semibold"}`}
                 >
-                  {L.next}
+                  {I18N[lang].next}
                 </button>
               </div>
             </div>
@@ -631,42 +676,44 @@ export default function App() {
 
       {/* STEP 2 */}
       {step === 2 && (
-        <div className="max-w-6xl mx-auto p-4">
+        <div className={`${wrapW} mx-auto ${shellPad}`}>
           {/* 排布码直接展示 */}
-          <div className="bg-neutral-900 rounded-2xl p-4 mb-4">
+          <div className={`bg-neutral-900 rounded-2xl ${cardPad} mb-3`}>
             <div className="flex items-center justify-between">
-              <div className="font-semibold">{L.codeBoxTitle}</div>
-              <button onClick={copyCode} className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700">
-                {L.copy}
+              <div className="font-semibold">{I18N[lang].codeBoxTitle}</div>
+              <button onClick={copyCode} className={`rounded bg-blue-600 hover:bg-blue-700 ${isMobile ? "px-2 py-1 text-sm" : "px-3 py-1.5"}`}>
+                {I18N[lang].copy}
               </button>
             </div>
             <textarea
-              className="w-full h-28 mt-2 rounded bg-neutral-800 border border-neutral-700 p-2 font-mono text-xs"
+              className={`w-full ${isMobile ? "h-24" : "h-28"} mt-2 rounded bg-neutral-800 border border-neutral-700 p-2 font-mono ${isMobile ? "text-[11px]" : "text-xs"}`}
               readOnly
               value={generatedCode}
               onFocus={(e) => e.currentTarget.select()}
             />
           </div>
 
-          <div ref={boardRef} className="bg-white text-black rounded-2xl p-4">
+          {/* 成品卡片 */}
+          <div
+            ref={boardRef}
+            className={`bg-white text-black rounded-2xl ${cardPad} ${tableText}`}
+          >
             {/* 页眉 */}
-            <div className="flex items-start justify-between">
-              <div>
-                <div className="text-xl font-bold">{title}</div>
-              </div>
+            <div className={`flex items-start justify-between ${isMobile ? "gap-2" : ""}`}>
+              <div className={`${isMobile ? "text-base" : "text-xl"} font-bold`}>{title}</div>
               <div className="text-right">
-                <div className="text-sm">{L.date}</div>
-                <div className="font-semibold">{dateStr}</div>
+                <div className={`${isMobile ? "text-[11px]" : "text-sm"}`}>{I18N[lang].date}</div>
+                <div className={`${isMobile ? "text-sm" : "font-semibold"}`}>{dateStr}</div>
               </div>
             </div>
 
-            {/* 表格 */}
-            <div className="mt-4 overflow-auto">
-              <table className="w-full border border-gray-300">
-                <thead>
-                  <tr className="bg-gray-100">
-                    <th className="p-2 border">{L.colFormRoom}</th>
-                    <th className="p-2 border">{L.colNameDept}</th>
+            {/* 表格（移动端紧凑 + 可横向滚动） */}
+            <div className={`mt-3 overflow-x-auto`}>
+              <table className="w-full table-fixed border border-gray-300">
+                <thead className="bg-gray-100 sticky top-0 z-10">
+                  <tr>
+                    <th className={`${thPad} border whitespace-nowrap`}>{I18N[lang].colFormRoom}</th>
+                    <th className={`${thPad} border`}>{I18N[lang].colNameDept}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -686,9 +733,9 @@ export default function App() {
                       const person = a?.person ?? "";
                       const dept = person ? (people.find((p) => p.name === person)?.dept ?? "") : "";
                       return (
-                        <tr key={r.id}>
-                          <td className="p-2 border">{formRoom}</td>
-                          <td className="p-2 border">
+                        <tr key={r.id} className={`${isMobile ? "align-top" : ""}`}>
+                          <td className={`${tdPad} border whitespace-nowrap`}>{formRoom}</td>
+                          <td className={`${tdPad} border break-words`}>
                             <span className="font-semibold">{person}</span>
                             {dept ? <span className="text-neutral-600"> {dept}</span> : null}
                           </td>
@@ -700,13 +747,16 @@ export default function App() {
             </div>
           </div>
 
-          {/* 操作按钮 */}
-          <div className="mt-3 flex gap-3">
-            <button onClick={() => setStep(1)} className="px-3 py-2 rounded bg-neutral-700 hover:bg-neutral-600">
-              {L.back}
+          {/* 操作按钮（移动端竖排） */}
+          <div className={`mt-3 flex ${btnStack} gap-3`}>
+            <button onClick={() => setStep(1)} className={`rounded bg-neutral-700 hover:bg-neutral-600 ${isMobile ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
+              {I18N[lang].back}
             </button>
-            <button onClick={exportJPG} className="px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-700">
-              {L.exportJPG}
+            <button onClick={exportJPG} className={`rounded bg-emerald-600 hover:bg-emerald-700 ${isMobile ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
+              {I18N[lang].exportJPG}
+            </button>
+            <button onClick={copyJPGToClipboard} className={`rounded bg-amber-600 hover:bg-amber-700 ${isMobile ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
+              {I18N[lang].copyJPG}
             </button>
           </div>
         </div>
