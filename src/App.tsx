@@ -54,7 +54,7 @@ const I18N: Record<Lang, any> = {
     importFail: "排布码无效或不兼容",
     colFormRoom: "班级 + 房号",
     colNameDept: "姓名 + 部门",
-    language: "语言",
+    language: "语言/Language",
     languageZh: "中文",
     languageEn: "English",
   },
@@ -79,7 +79,7 @@ const I18N: Record<Lang, any> = {
     importFail: "Invalid or incompatible rota code",
     colFormRoom: "Class + Room",
     colNameDept: "Name + Department",
-    language: "Language",
+    language: "语言/Language",
     languageZh: "中文",
     languageEn: "English",
   },
@@ -99,6 +99,32 @@ function parseRoomId(raw: string): { building: string; number: number; floor: nu
   return { building, number, floor };
 }
 const pairKey = (a: string, b: string) => [a, b].sort().join("+");
+
+// 简单可复现的伪随机
+function makeRNG(seed: number) {
+  let s = seed >>> 0;
+  return () => {
+    s = (1664525 * s + 1013904223) >>> 0;
+    return s / 2 ** 32;
+  };
+}
+function randomSeed() {
+  try {
+    const u = new Uint32Array(1);
+    crypto.getRandomValues(u);
+    return u[0] >>> 0;
+  } catch {
+    return (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+  }
+}
+function shuffle<T>(arr: T[], rnd: () => number) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 
 /** ---- RotaCode (v2 recommended, v1 compatible) ---- */
 function toBase64URL(u8: Uint8Array) {
@@ -184,8 +210,7 @@ async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
       dept: p.dept,
       active: true,
       assignedCount: 0,
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+    }));
 
   const rooms: Room[] = j.rooms.map((rr) => {
     const parsed = parseRoomId(rr.id);
@@ -206,7 +231,12 @@ async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
 /** =========================
  *        Matching
  *  ========================= */
-function makeCost(p: Person, slot: Slot, strong = true): number {
+function makeCost(
+  p: Person,
+  slot: Slot,
+  strong: boolean,
+  randJitter: (() => number) | null
+): number {
   const last = new Set(p.lastRooms || []);
   if (strong) {
     for (const r of slot.rooms) if (last.has(r)) return 1e6;
@@ -216,8 +246,12 @@ function makeCost(p: Person, slot: Slot, strong = true): number {
   for (const r of slot.rooms) if (last.has(r)) c += 100;
   if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) c += 200;
   c += p.assignedCount * 5;
+
+  // 无历史时加一个极小的“随机抖动”，打破纯字母顺序/固定解
+  if (randJitter) c += Math.floor(randJitter() * 2); // 加 0 或 1，不影响硬性约束
   return c;
 }
+
 function greedyAdjacentPairs(rooms: Room[], need: number, used: Set<string>): Slot[] {
   const sorted = rooms.slice().sort((a, b) =>
     a.building === b.building
@@ -260,14 +294,19 @@ function fillPairsByNearest(rooms: Room[], need: number, used: Set<string>): Slo
   }
   return picked;
 }
-function hungarianAssign(people: Person[], slots: Slot[]): Assignment[] {
+
+function hungarianAssign(
+  people: Person[],
+  slots: Slot[],
+  randJitter: (() => number) | null
+): Assignment[] {
   const P = people.length, S = slots.length, N = Math.max(P, S);
   const M: number[][] = Array.from({ length: N }, () => Array(N).fill(0));
   for (let i = 0; i < N; i++) {
     for (let j = 0; j < N; j++) {
-      if (i < P && j < S) M[i][j] = makeCost(people[i], slots[j], true);
-      else if (i < P && j >= S) M[i][j] = 500;
-      else if (i >= P && j < S) M[i][j] = 1000;
+      if (i < P && j < S) M[i][j] = makeCost(people[i], slots[j], true, randJitter);
+      else if (i < P && j >= S) M[i][j] = 500 + (randJitter ? Math.floor(randJitter() * 2) : 0);
+      else if (i >= P && j < S) M[i][j] = 1000 + (randJitter ? Math.floor(randJitter() * 2) : 0);
       else M[i][j] = 0;
     }
   }
@@ -278,10 +317,25 @@ function hungarianAssign(people: Person[], slots: Slot[]): Assignment[] {
   for (const [ri, cj] of idxs) if (ri < P && cj < S) out.push({ person: people[ri].name, rooms: slots[cj].rooms.slice() });
   return out;
 }
-function generateAssignment(peopleIn: Person[], roomsIn: Room[]): Assignment[] {
-  const people = peopleIn.filter((p) => p.active);
+
+function generateAssignment(
+  peopleIn: Person[],
+  roomsIn: Room[],
+  randJitter: (() => number) | null,
+  shufflePeople: boolean
+): Assignment[] {
+  const peopleRaw = peopleIn.filter((p) => p.active);
   const enabledRooms = roomsIn.filter((r) => r.enabled);
-  if (!people.length || !enabledRooms.length) return [];
+  if (!peopleRaw.length || !enabledRooms.length) return [];
+
+  // 是否先打乱人员顺序（无历史时启用）
+  const people = shufflePeople ? peopleRaw.slice() : peopleRaw.slice();
+  if (shufflePeople && randJitter) {
+    const seedRand = randJitter; // 复用同一 RNG
+    const shuffled = shuffle(people, seedRand);
+    for (let i = 0; i < people.length; i++) people[i] = shuffled[i];
+  }
+
   const R = enabledRooms.length, P = people.length;
   const D = Math.max(0, R - P);
 
@@ -292,10 +346,13 @@ function generateAssignment(peopleIn: Person[], roomsIn: Room[]): Assignment[] {
     const extra = fillPairsByNearest(enabledRooms, D - pairs.length, used);
     pairs = pairs.concat(extra);
   }
+
   const singles: Slot[] = enabledRooms.filter((r) => !used.has(r.id)).map((r) => ({ id: r.id, rooms: [r.id] }));
   const slots: Slot[] = [...pairs, ...singles];
-  const base = hungarianAssign(people, slots);
 
+  const base = hungarianAssign(people, slots, randJitter);
+
+  // 兜底
   const assignedRooms = new Set(base.flatMap((a) => a.rooms));
   const still = enabledRooms.filter((r) => !assignedRooms.has(r.id));
   if (still.length) {
@@ -317,7 +374,7 @@ function generateAssignment(peopleIn: Person[], roomsIn: Room[]): Assignment[] {
  *        Component
  *  ========================= */
 export default function App() {
-  // language (persist to localStorage)
+  // language
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("lang") as Lang) || "zh");
   const L = I18N[lang];
   useEffect(() => { localStorage.setItem("lang", lang); }, [lang]);
@@ -409,11 +466,18 @@ export default function App() {
   }
 
   function doGenerate() {
-    const A = generateAssignment(people, filteredRooms);
+    // 是否存在“上一轮数据”
+    const hasHistory = people.some((p) => (p.lastRooms?.length || 0) > 0 || p.lastPairKey);
+    // 无历史：使用随机种子制造“抖动 + 随机顺序”
+    const seed = randomSeed();
+    const rng = makeRNG(seed);
+    const randJitter = hasHistory ? null : rng;
+
+    const A = generateAssignment(people, filteredRooms, randJitter, !hasHistory);
     setAssignments(A);
     setStep(2);
 
-    // generate code (v2) & copy
+    // 生成 v2 排布码并复制
     const payload = { date: dateStr, assignments: A };
     packRotaCodeV2(payload).then((code) => {
       setGeneratedCode(code);
@@ -525,7 +589,8 @@ export default function App() {
               <div className="bg-neutral-800 rounded-xl p-3">
                 <div className="font-semibold mb-2">{L.peopleSel}</div>
                 <div className="h-64 overflow-auto divide-y divide-neutral-700">
-                  {people.map((p) => (
+                  {/* 展示按名字升序，方便勾选；分配时已使用随机顺序 */}
+                  {people.slice().sort((a,b)=>a.name.localeCompare(b.name)).map((p) => (
                     <label key={p.id} className="flex items-center gap-2 py-1">
                       <input type="checkbox" checked={p.active} onChange={() => togglePerson(p.id)} />
                       <span>{p.name}</span>
