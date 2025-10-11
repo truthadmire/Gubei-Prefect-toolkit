@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import Munkres from "munkres-js";
 
 /** =========================
- *        Type 定义
+ *        Types
  *  ========================= */
 type Person = {
   id: string;
@@ -26,11 +26,67 @@ type Assignment = { person: string; rooms: string[] };
 type RosterJson = {
   people: { name: string; dept?: string }[];
   rooms: { id: string; form?: string }[];
-  deptColors?: Record<string, string>;
+};
+type Lang = "zh" | "en";
+
+/** =========================
+ *        I18N
+ *  ========================= */
+const I18N: Record<Lang, any> = {
+  zh: {
+    setup: "准备界面",
+    result: "成品界面",
+    titlePh: "输入标题（默认含 SUIS GB）",
+    date: "日期",
+    lastCodePh: "上一轮排布码（粘贴最近一条；支持 v1/v2）",
+    status: (peo: number, rooms: number, pairs: number) =>
+      `人员: ${peo}，房间: ${rooms}（需 ${pairs} 位二班）`,
+    peopleSel: "人员选择",
+    formSel: "班级（Form）选择",
+    next: "下一步",
+    back: "返回",
+    exportJPG: "导出 JPG",
+    codeBoxTitle: "排布码（已生成，粘贴到下一轮以避免重复）",
+    copy: "复制",
+    copyOk: "排布码已复制",
+    copyFail: "复制失败，请手动选择复制",
+    importOk: "已导入上一轮排布码",
+    importFail: "排布码无效或不兼容",
+    colFormRoom: "班级 + 房号",
+    colNameDept: "姓名 + 部门",
+    language: "语言",
+    languageZh: "中文",
+    languageEn: "English",
+  },
+  en: {
+    setup: "Setup",
+    result: "Result",
+    titlePh: "Title (includes SUIS GB by default)",
+    date: "Date",
+    lastCodePh: "Last rota code (paste the latest; supports v1/v2)",
+    status: (peo: number, rooms: number, pairs: number) =>
+      `People: ${peo}, Rooms: ${rooms} (need ${pairs} double-duty)`,
+    peopleSel: "People",
+    formSel: "Forms",
+    next: "Next",
+    back: "Back",
+    exportJPG: "Export JPG",
+    codeBoxTitle: "Rota Code (paste next time to avoid repeats)",
+    copy: "Copy",
+    copyOk: "Rota code copied",
+    copyFail: "Copy failed, please select and copy",
+    importOk: "Imported last rota code",
+    importFail: "Invalid or incompatible rota code",
+    colFormRoom: "Class + Room",
+    colNameDept: "Name + Department",
+    language: "Language",
+    languageZh: "中文",
+    languageEn: "English",
+  },
 };
 
 /** =========================
- *        工具函数
+ *        Utils
  *  ========================= */
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -44,10 +100,7 @@ function parseRoomId(raw: string): { building: string; number: number; floor: nu
 }
 const pairKey = (a: string, b: string) => [a, b].sort().join("+");
 
-/** ---- 排布码（跨浏览器稳定） ----
- *  ROTAv2：不压缩，直接 UTF-8 → base64url（所有浏览器都能解）
- *  同时兼容 ROTAv1（之前可能压缩过）
- */
+/** ---- RotaCode (v2 recommended, v1 compatible) ---- */
 function toBase64URL(u8: Uint8Array) {
   let s = btoa(String.fromCharCode(...Array.from(u8)));
   return s.replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
@@ -70,7 +123,7 @@ function crc32(str: string) {
   return (~c) >>> 0;
 }
 
-// v2（推荐）：无压缩
+// v2: no compression
 async function packRotaCodeV2(payload: any) {
   const json = JSON.stringify(payload);
   const b64 = toBase64URL(new TextEncoder().encode(json));
@@ -88,13 +141,9 @@ async function unpackRotaCodeV2(code: string) {
   const u8 = fromBase64URL(b64);
   return JSON.parse(new TextDecoder().decode(u8));
 }
-
-// 兼容旧的 v1：若设备不支持解压，尝试直接按“无压缩”解
+// v1 compatibility (compressed or not)
 async function unpackRotaCodeCompat(code: string) {
-  // 优先 v2
   if (code.startsWith("ROTAv2.")) return unpackRotaCodeV2(code);
-
-  // v1（可能压缩也可能无压缩）
   if (!code.startsWith("ROTAv1.")) throw new Error("Unknown code");
   const parts = code.split(".");
   if (parts.length < 3) throw new Error("Malformed");
@@ -103,14 +152,13 @@ async function unpackRotaCodeCompat(code: string) {
   const calc = crc32(b64).toString(16).toUpperCase().padStart(8, "0");
   if (calc !== crc) throw new Error("CRC mismatch");
 
-  // 先按“无压缩”尝试（兼容有人在不支持解压的设备上生成）
+  // try plain (no compression)
   try {
-    const u8raw = fromBase64URL(b64);
-    const raw = new TextDecoder().decode(u8raw);
+    const raw = new TextDecoder().decode(fromBase64URL(b64));
     return JSON.parse(raw);
   } catch {}
 
-  // 再尝试浏览器原生解压（若有）
+  // try native inflate if available
   if ((globalThis as any).DecompressionStream) {
     const u8 = fromBase64URL(b64);
     const ds = new (globalThis as any).DecompressionStream("deflate-raw");
@@ -120,7 +168,6 @@ async function unpackRotaCodeCompat(code: string) {
     const buf = await new Response(ds.readable).arrayBuffer();
     return JSON.parse(new TextDecoder().decode(buf));
   }
-
   throw new Error("This browser cannot decode old v1 compressed code.");
 }
 
@@ -134,55 +181,51 @@ async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
     .map((p) => ({
       id: uid(),
       name: p.name,
-      dept: p.dept, // 接受任何部门名
+      dept: p.dept,
       active: true,
       assignedCount: 0,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  const rooms: Room[] = j.rooms
-    .map((rr) => {
-      const parsed = parseRoomId(rr.id);
-      if (!parsed) throw new Error(`Bad room id: ${rr.id}`);
-      return {
-        id: rr.id,
-        form: rr.form,
-        building: parsed.building,
-        number: parsed.number,
-        floor: parsed.floor,
-        enabled: true,
-      };
-    });
+  const rooms: Room[] = j.rooms.map((rr) => {
+    const parsed = parseRoomId(rr.id);
+    if (!parsed) throw new Error(`Bad room id: ${rr.id}`);
+    return {
+      id: rr.id,
+      form: rr.form,
+      building: parsed.building,
+      number: parsed.number,
+      floor: parsed.floor,
+      enabled: true,
+    };
+  });
+
   return { people, rooms };
 }
 
 /** =========================
- *        匹配算法
+ *        Matching
  *  ========================= */
 function makeCost(p: Person, slot: Slot, strong = true): number {
   const last = new Set(p.lastRooms || []);
   if (strong) {
-    for (const r of slot.rooms) if (last.has(r)) return 1e6; // 连续同房禁止
-    if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) return 1e6; // 连续同房对禁止
+    for (const r of slot.rooms) if (last.has(r)) return 1e6;
+    if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) return 1e6;
   }
   let c = 0;
-  for (const r of slot.rooms) if (last.has(r)) c += 100; // 软惩罚（上一轮同房）
-  if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) c += 200; // 软惩罚（上一轮同房对）
-  c += p.assignedCount * 5; // 公平性
+  for (const r of slot.rooms) if (last.has(r)) c += 100;
+  if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) c += 200;
+  c += p.assignedCount * 5;
   return c;
 }
-
-// 相邻优先的贪心配对
 function greedyAdjacentPairs(rooms: Room[], need: number, used: Set<string>): Slot[] {
-  const sorted = rooms
-    .slice()
-    .sort((a, b) =>
-      a.building === b.building
-        ? a.floor === b.floor
-          ? a.number - b.number
-          : a.floor - b.floor
-        : a.building.localeCompare(b.building)
-    );
+  const sorted = rooms.slice().sort((a, b) =>
+    a.building === b.building
+      ? a.floor === b.floor
+        ? a.number - b.number
+        : a.floor - b.floor
+      : a.building.localeCompare(b.building)
+  );
   const pairs: Slot[] = [];
   for (let i = 0; i < sorted.length - 1 && pairs.length < need; i++) {
     const a = sorted[i], b = sorted[i + 1];
@@ -194,11 +237,9 @@ function greedyAdjacentPairs(rooms: Room[], need: number, used: Set<string>): Sl
   }
   return pairs;
 }
-
-// 不足相邻对时，用“最近邻距离”补足配对（同楼同层优先）
 function distance(a: Room, b: Room): number {
   if (a.building !== b.building) return 1e9 + Math.abs(a.number - b.number);
-  const floorPenalty = Math.abs(a.floor - b.floor) * 1000; // 楼层差距重罚
+  const floorPenalty = Math.abs(a.floor - b.floor) * 1000;
   return floorPenalty + Math.abs(a.number - b.number);
 }
 function fillPairsByNearest(rooms: Room[], need: number, used: Set<string>): Slot[] {
@@ -219,15 +260,14 @@ function fillPairsByNearest(rooms: Room[], need: number, used: Set<string>): Slo
   }
   return picked;
 }
-
 function hungarianAssign(people: Person[], slots: Slot[]): Assignment[] {
   const P = people.length, S = slots.length, N = Math.max(P, S);
   const M: number[][] = Array.from({ length: N }, () => Array(N).fill(0));
   for (let i = 0; i < N; i++) {
     for (let j = 0; j < N; j++) {
       if (i < P && j < S) M[i][j] = makeCost(people[i], slots[j], true);
-      else if (i < P && j >= S) M[i][j] = 500;   // person -> dummy
-      else if (i >= P && j < S) M[i][j] = 1000;  // dummy -> real slot (尽量避免)
+      else if (i < P && j >= S) M[i][j] = 500;
+      else if (i >= P && j < S) M[i][j] = 1000;
       else M[i][j] = 0;
     }
   }
@@ -238,15 +278,12 @@ function hungarianAssign(people: Person[], slots: Slot[]): Assignment[] {
   for (const [ri, cj] of idxs) if (ri < P && cj < S) out.push({ person: people[ri].name, rooms: slots[cj].rooms.slice() });
   return out;
 }
-
-// 生成：保证“房间必有人”
 function generateAssignment(peopleIn: Person[], roomsIn: Room[]): Assignment[] {
   const people = peopleIn.filter((p) => p.active);
   const enabledRooms = roomsIn.filter((r) => r.enabled);
   if (!people.length || !enabledRooms.length) return [];
-
   const R = enabledRooms.length, P = people.length;
-  const D = Math.max(0, R - P); // 需要二班的数量
+  const D = Math.max(0, R - P);
 
   const used = new Set<string>();
   const pairs1 = greedyAdjacentPairs(enabledRooms, D, used);
@@ -255,13 +292,10 @@ function generateAssignment(peopleIn: Person[], roomsIn: Room[]): Assignment[] {
     const extra = fillPairsByNearest(enabledRooms, D - pairs.length, used);
     pairs = pairs.concat(extra);
   }
-
   const singles: Slot[] = enabledRooms.filter((r) => !used.has(r.id)).map((r) => ({ id: r.id, rooms: [r.id] }));
-  const slots: Slot[] = [...pairs, ...singles]; // slots 数量 = min(R, P)
-
+  const slots: Slot[] = [...pairs, ...singles];
   const base = hungarianAssign(people, slots);
 
-  // 兜底：任何遗漏的房间也强行分给“当轮最少被用的人”
   const assignedRooms = new Set(base.flatMap((a) => a.rooms));
   const still = enabledRooms.filter((r) => !assignedRooms.has(r.id));
   if (still.length) {
@@ -280,9 +314,14 @@ function generateAssignment(peopleIn: Person[], roomsIn: Room[]): Assignment[] {
 }
 
 /** =========================
- *        组件主体
+ *        Component
  *  ========================= */
 export default function App() {
+  // language (persist to localStorage)
+  const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("lang") as Lang) || "zh");
+  const L = I18N[lang];
+  useEffect(() => { localStorage.setItem("lang", lang); }, [lang]);
+
   // data
   const [loaded, setLoaded] = useState(false);
   const [people, setPeople] = useState<Person[]>([]);
@@ -297,7 +336,7 @@ export default function App() {
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const boardRef = useRef<HTMLDivElement>(null);
 
-  // RotaCode 展示 & Toast
+  // RotaCode + Toast
   const [generatedCode, setGeneratedCode] = useState("");
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null);
   const showToast = (text: string, ms = 1600) => {
@@ -306,7 +345,7 @@ export default function App() {
     setTimeout(() => setToast((t) => (t && t.id === id ? null : t)), ms);
   };
 
-  // load once
+  // load roster
   useEffect(() => {
     loadRoster()
       .then(({ people, rooms }) => {
@@ -322,7 +361,7 @@ export default function App() {
       });
   }, []);
 
-  // 应用上一轮排布码（只需贴最近一条）
+  // import last rota
   useEffect(() => {
     if (!rotaCodeIn.trim() || !people.length) return;
     (async () => {
@@ -337,27 +376,26 @@ export default function App() {
           }
         }
         setPeople(Array.from(map.values()));
-        showToast("已导入上一轮排布码");
-      } catch (e: any) {
+        showToast(L.importOk);
+      } catch (e) {
         console.warn(e);
-        showToast("排布码无效或不兼容");
+        showToast(L.importFail);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rotaCodeIn, people.length]);
+  }, [rotaCodeIn, people.length, lang]);
 
-  // 过滤后的房间
+  // helpers
   const filteredRooms = useMemo(() => {
     return rooms.map((r) => ({ ...r, enabled: r.form ? allowedForms.has(r.form) : true }));
   }, [rooms, allowedForms]);
 
-  // 状态条
   const statusText = useMemo(() => {
     const activeCount = people.filter((p) => p.active).length;
     const roomCount = filteredRooms.filter((r) => r.enabled).length;
     const needPairs = Math.max(0, roomCount - activeCount);
-    return `人员: ${activeCount}，房间: ${roomCount}（需 ${needPairs} 位二班）`;
-  }, [people, filteredRooms]);
+    return L.status(activeCount, roomCount, needPairs);
+  }, [people, filteredRooms, lang]);
 
   function toggleForm(form: string) {
     setAllowedForms((prev) => {
@@ -375,38 +413,36 @@ export default function App() {
     setAssignments(A);
     setStep(2);
 
-    // 生成并展示 v2 排布码
+    // generate code (v2) & copy
     const payload = { date: dateStr, assignments: A };
     packRotaCodeV2(payload).then((code) => {
       setGeneratedCode(code);
-      // 自动尝试复制
       navigator.clipboard.writeText(code).then(
-        () => showToast("排布码已复制"),
-        () => showToast("已生成排布码，可手动复制")
+        () => showToast(L.copyOk),
+        () => showToast(L.codeBoxTitle) // 提示已生成，可手动复制
       );
     });
   }
 
   async function exportJPG() {
     if (!boardRef.current) return;
-    const { toJpeg } = await import("html-to-image"); // 动态导入，减小主包
+    const { toJpeg } = await import("html-to-image");
     const dataUrl = await toJpeg(boardRef.current, { quality: 0.95, pixelRatio: 3, backgroundColor: "#ffffff" });
     const link = document.createElement("a");
     link.href = dataUrl;
     link.download = `${title.replace(/\s+/g, "_")}_${dateStr}.jpg`;
     link.click();
   }
-
   async function copyCode() {
     try {
       await navigator.clipboard.writeText(generatedCode);
-      showToast("排布码已复制");
+      showToast(L.copyOk);
     } catch {
-      showToast("复制失败，请手动选择复制");
+      showToast(L.copyFail);
     }
   }
 
-  // 解析 form 的年级（用于排序）
+  // grade parse for sorting 9→12
   const gradeOf = (form?: string) => {
     if (!form) return 999;
     const m = form.match(/^(\d{1,2})/);
@@ -416,8 +452,9 @@ export default function App() {
     return 999;
   };
 
-  if (!loaded)
+  if (!loaded) {
     return <div className="min-h-screen flex items-center justify-center text-neutral-400">Loading roster…</div>;
+  }
 
   const allForms = Array.from(new Set(rooms.map((r) => r.form || ""))).filter(Boolean).sort();
 
@@ -426,14 +463,29 @@ export default function App() {
       {/* Toast */}
       {toast && (
         <div className="fixed top-4 right-4 z-50">
-          <div className="bg-white text-black rounded-xl shadow px-4 py-2">
-            {toast.text}
-          </div>
+          <div className="bg-white text-black rounded-xl shadow px-4 py-2">{toast.text}</div>
         </div>
       )}
 
       <div className="max-w-6xl mx-auto p-4">
-        <div className="text-2xl font-bold">{step === 1 ? "准备界面" : "成品界面"}</div>
+        <div className="flex items-center justify-between">
+          <div className="text-2xl font-bold">{step === 1 ? L.setup : L.result}</div>
+
+          {/* 语言切换（准备界面） */}
+          {step === 1 && (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-neutral-400">{L.language}：</span>
+              <select
+                value={lang}
+                onChange={(e) => setLang(e.target.value as Lang)}
+                className="bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-sm"
+              >
+                <option value="zh">{L.languageZh}</option>
+                <option value="en">{L.languageEn}</option>
+              </select>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* STEP 1 */}
@@ -444,7 +496,7 @@ export default function App() {
             <div className="flex flex-col gap-3 md:flex-row md:items-center">
               <input
                 className="flex-1 rounded px-3 py-2 bg-neutral-800 border border-neutral-700"
-                placeholder="输入标题（默认含 SUIS GB）"
+                placeholder={L.titlePh}
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
               />
@@ -453,10 +505,12 @@ export default function App() {
                 className="rounded px-3 py-2 bg-neutral-800 border border-neutral-700"
                 value={dateStr}
                 onChange={(e) => setDateStr(e.target.value)}
+                aria-label={L.date}
+                title={L.date}
               />
               <input
                 className="w-full md:w-[460px] rounded px-3 py-2 bg-neutral-800 border border-neutral-700"
-                placeholder="上一轮排布码（粘贴最近一条；支持 v1/v2）"
+                placeholder={L.lastCodePh}
                 value={rotaCodeIn}
                 onChange={(e) => setRotaCodeIn(e.target.value)}
               />
@@ -469,7 +523,7 @@ export default function App() {
             <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* 人员 */}
               <div className="bg-neutral-800 rounded-xl p-3">
-                <div className="font-semibold mb-2">人员选择</div>
+                <div className="font-semibold mb-2">{L.peopleSel}</div>
                 <div className="h-64 overflow-auto divide-y divide-neutral-700">
                   {people.map((p) => (
                     <label key={p.id} className="flex items-center gap-2 py-1">
@@ -482,7 +536,7 @@ export default function App() {
 
               {/* Form */}
               <div className="bg-neutral-800 rounded-xl p-3">
-                <div className="font-semibold mb-2">班级（Form）选择</div>
+                <div className="font-semibold mb-2">{L.formSel}</div>
                 <div className="flex flex-wrap gap-2">
                   {allForms.map((f) => (
                     <button
@@ -498,8 +552,11 @@ export default function App() {
 
               {/* 下一步 */}
               <div className="flex items-end">
-                <button onClick={doGenerate} className="w-full bg-blue-600 hover:bg-blue-700 rounded-xl py-3 font-semibold">
-                  下一步
+                <button
+                  onClick={doGenerate}
+                  className="w-full bg-blue-600 hover:bg-blue-700 rounded-xl py-3 font-semibold"
+                >
+                  {L.next}
                 </button>
               </div>
             </div>
@@ -513,8 +570,10 @@ export default function App() {
           {/* 排布码直接展示 */}
           <div className="bg-neutral-900 rounded-2xl p-4 mb-4">
             <div className="flex items-center justify-between">
-              <div className="font-semibold">排布码（已生成，粘贴到下一轮以避免重复）</div>
-              <button onClick={copyCode} className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700">复制</button>
+              <div className="font-semibold">{L.codeBoxTitle}</div>
+              <button onClick={copyCode} className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700">
+                {L.copy}
+              </button>
             </div>
             <textarea
               className="w-full h-28 mt-2 rounded bg-neutral-800 border border-neutral-700 p-2 font-mono text-xs"
@@ -531,7 +590,7 @@ export default function App() {
                 <div className="text-xl font-bold">{title}</div>
               </div>
               <div className="text-right">
-                <div className="text-sm">Date</div>
+                <div className="text-sm">{L.date}</div>
                 <div className="font-semibold">{dateStr}</div>
               </div>
             </div>
@@ -541,15 +600,15 @@ export default function App() {
               <table className="w-full border border-gray-300">
                 <thead>
                   <tr className="bg-gray-100">
-                    <th className="p-2 border">班级 + 房号</th>
-                    <th className="p-2 border">姓名 + 部门</th>
+                    <th className="p-2 border">{L.colFormRoom}</th>
+                    <th className="p-2 border">{L.colNameDept}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {rooms
                     .filter((r) => filteredRooms.find((fr) => fr.id === r.id)?.enabled)
                     .sort((a, b) => {
-                      // 先按年级 9→12，再按房间先后（building→floor→number）
+                      // 先 9→12 年级，再 building→floor→number
                       const ga = gradeOf(a.form), gb = gradeOf(b.form);
                       if (ga !== gb) return ga - gb;
                       if (a.building !== b.building) return a.building.localeCompare(b.building);
@@ -558,7 +617,7 @@ export default function App() {
                     })
                     .map((r) => {
                       const a = assignments.find((x) => x.rooms.includes(r.id));
-                      const formRoom = r.form ? `${r.form} ${r.id}` : r.id; // 固定显示：Form Room
+                      const formRoom = r.form ? `${r.form} ${r.id}` : r.id;
                       const person = a?.person ?? "";
                       const dept = person ? (people.find((p) => p.name === person)?.dept ?? "") : "";
                       return (
@@ -579,10 +638,10 @@ export default function App() {
           {/* 操作按钮 */}
           <div className="mt-3 flex gap-3">
             <button onClick={() => setStep(1)} className="px-3 py-2 rounded bg-neutral-700 hover:bg-neutral-600">
-              返回
+              {L.back}
             </button>
             <button onClick={exportJPG} className="px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-700">
-              导出 JPG
+              {L.exportJPG}
             </button>
           </div>
         </div>
