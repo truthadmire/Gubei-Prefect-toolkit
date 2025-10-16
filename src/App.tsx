@@ -230,12 +230,24 @@ async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
 /** =========================
  *        Matching
  *  ========================= */
+
+// 硬性限制：Hepburn He 不可去 12 开头的 form
+const FORBID_NAME = "Hepburn He";
+
 function makeCost(
   p: Person,
   slot: Slot,
   strong: boolean,
-  randJitter: (() => number) | null
+  randJitter: (() => number) | null,
+  forbidRoomIds: Set<string>
 ): number {
+  // ---- 新增硬性限制：若 Hepburn He 且 slot 里有 12 年级房间，直接禁止 ----
+  if (p.name === FORBID_NAME) {
+    for (const rid of slot.rooms) {
+      if (forbidRoomIds.has(rid)) return 1e9; // 极大代价，相当于不可分配
+    }
+  }
+
   const last = new Set(p.lastRooms || []);
   if (strong) {
     for (const r of slot.rooms) if (last.has(r)) return 1e6;
@@ -245,9 +257,11 @@ function makeCost(
   for (const r of slot.rooms) if (last.has(r)) c += 100;
   if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) c += 200;
   c += p.assignedCount * 5;
+
   if (randJitter) c += Math.floor(randJitter() * 2); // 0/1 抖动打破固定解
   return c;
 }
+
 function greedyAdjacentPairs(rooms: Room[], need: number, used: Set<string>): Slot[] {
   const sorted = rooms.slice().sort((a, b) =>
     a.building === b.building
@@ -290,16 +304,18 @@ function fillPairsByNearest(rooms: Room[], need: number, used: Set<string>): Slo
   }
   return picked;
 }
+
 function hungarianAssign(
   people: Person[],
   slots: Slot[],
-  randJitter: (() => number) | null
+  randJitter: (() => number) | null,
+  forbidRoomIds: Set<string>
 ): Assignment[] {
   const P = people.length, S = slots.length, N = Math.max(P, S);
   const M: number[][] = Array.from({ length: N }, () => Array(N).fill(0));
   for (let i = 0; i < N; i++) {
     for (let j = 0; j < N; j++) {
-      if (i < P && j < S) M[i][j] = makeCost(people[i], slots[j], true, randJitter);
+      if (i < P && j < S) M[i][j] = makeCost(people[i], slots[j], true, randJitter, forbidRoomIds);
       else if (i < P && j >= S) M[i][j] = 500 + (randJitter ? Math.floor(randJitter() * 2) : 0);
       else if (i >= P && j < S) M[i][j] = 1000 + (randJitter ? Math.floor(randJitter() * 2) : 0);
       else M[i][j] = 0;
@@ -312,11 +328,13 @@ function hungarianAssign(
   for (const [ri, cj] of idxs) if (ri < P && cj < S) out.push({ person: people[ri].name, rooms: slots[cj].rooms.slice() });
   return out;
 }
+
 function generateAssignment(
   peopleIn: Person[],
   roomsIn: Room[],
   randJitter: (() => number) | null,
-  shufflePeople: boolean
+  shufflePeople: boolean,
+  forbidRoomIds: Set<string>
 ): Assignment[] {
   const peopleRaw = peopleIn.filter((p) => p.active);
   const enabledRooms = roomsIn.filter((r) => r.enabled);
@@ -338,21 +356,33 @@ function generateAssignment(
   const singles: Slot[] = enabledRooms.filter((r) => !used.has(r.id)).map((r) => ({ id: r.id, rooms: [r.id] }));
   const slots: Slot[] = [...pairs, ...singles];
 
-  const base = hungarianAssign(people, slots, randJitter);
+  const base = hungarianAssign(people, slots, randJitter, forbidRoomIds);
 
-  // 兜底
+  // 兜底：任何遗漏的房间强行分给“当前最少的人”，但仍然要**尊重禁止规则**
   const assignedRooms = new Set(base.flatMap((a) => a.rooms));
   const still = enabledRooms.filter((r) => !assignedRooms.has(r.id));
   if (still.length) {
     const usedBy: Map<string, number> = new Map();
     for (const a of base) usedBy.set(a.person, (usedBy.get(a.person) || 0) + a.rooms.length);
     const pool = people.slice().sort((a, b) => (usedBy.get(a.name) || 0) - (usedBy.get(b.name) || 0));
+
     let pi = 0;
     for (const r of still) {
-      const p = pool[pi % pool.length];
-      base.push({ person: p.name, rooms: [r.id] });
-      usedBy.set(p.name, (usedBy.get(p.name) || 0) + 1);
-      pi++;
+      // 对于 12 年级房间，跳过 Hepburn He
+      let chosen: Person | null = null;
+      for (let k = 0; k < pool.length; k++) {
+        const cand = pool[(pi + k) % pool.length];
+        if (!(cand.name === FORBID_NAME && forbidRoomIds.has(r.id))) {
+          chosen = cand;
+          pi = (pi + k + 1) % pool.length;
+          break;
+        }
+      }
+      if (chosen) {
+        base.push({ person: chosen.name, rooms: [r.id] });
+        usedBy.set(chosen.name, (usedBy.get(chosen.name) || 0) + 1);
+      }
+      // 若 chosen 仍为空，说明所有人都被禁（极端不可能场景），则不分配该房间
     }
   }
   return base;
@@ -452,6 +482,15 @@ export default function App() {
     return L.status(activeCount, roomCount, needPairs);
   }, [people, filteredRooms, lang]);
 
+  // === 计算“禁止分配”的房间集合（所有 form 以 12 开头）===
+  const forbidRoomIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rooms) {
+      if (r.form && /^12/.test(r.form)) set.add(r.id);
+    }
+    return set;
+  }, [rooms]);
+
   function toggleForm(form: string) {
     setAllowedForms((prev) => {
       const n = new Set(prev);
@@ -471,7 +510,7 @@ export default function App() {
     const rng = makeRNG(seed);
     const randJitter = hasHistory ? null : rng;
 
-    const A = generateAssignment(people, filteredRooms, randJitter, !hasHistory);
+    const A = generateAssignment(people, filteredRooms, randJitter, !hasHistory, forbidRoomIds);
     setAssignments(A);
     setStep(2);
 
@@ -565,7 +604,6 @@ export default function App() {
   const tableText = isMobile ? "text-[12px] leading-tight" : "text-base";
   const thPad = isMobile ? "p-1.5" : "p-2";
   const tdPad = isMobile ? "p-1.5" : "p-2";
-  const btnStack = isMobile ? "flex-col" : "flex-row";
 
   return (
     <div className="min-h-screen bg-black text-white">
@@ -577,7 +615,7 @@ export default function App() {
       )}
 
       <div className={`${wrapW} mx-auto ${shellPad}`}>
-        <div className={`flex items-center justify-between ${isMobile ? "mb-2" : "mb-0"}`}>
+        <div className={`flex items-center justify-between`}>
           <div className={`${headerText} font-bold`}>{step === 1 ? I18N[lang].setup : I18N[lang].result}</div>
 
           {/* 语言切换（准备界面） */}
@@ -644,7 +682,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Form（移动端换行按钮更紧凑） */}
+              {/* Form */}
               <div className="bg-neutral-800 rounded-xl p-3">
                 <div className="font-semibold mb-2">{I18N[lang].formSel}</div>
                 <div className="flex flex-wrap gap-2">
@@ -707,7 +745,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* 表格（移动端紧凑 + 可横向滚动） */}
+            {/* 表格 */}
             <div className={`mt-3 overflow-x-auto`}>
               <table className="w-full table-fixed border border-gray-300">
                 <thead className="bg-gray-100 sticky top-0 z-10">
@@ -747,8 +785,8 @@ export default function App() {
             </div>
           </div>
 
-          {/* 操作按钮（移动端竖排） */}
-          <div className={`mt-3 flex ${btnStack} gap-3`}>
+          {/* 操作按钮 */}
+          <div className={`mt-3 flex ${isMobile ? "flex-col" : "flex-row"} gap-3`}>
             <button onClick={() => setStep(1)} className={`rounded bg-neutral-700 hover:bg-neutral-600 ${isMobile ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
               {I18N[lang].back}
             </button>
