@@ -9,6 +9,7 @@ type Person = {
   name: string;
   dept?: string;
   active: boolean;
+  canDouble: boolean; //  是否允许 double duty
   assignedCount: number;
   lastRooms?: string[];
   lastPairKey?: string;
@@ -21,7 +22,7 @@ type Room = {
   floor: number;
   enabled: boolean;
 };
-type Slot = { id: string; rooms: string[] };
+type Slot = { id: string; rooms: string[] }; // 单间 or 成对房间（双班）
 type Assignment = { person: string; rooms: string[] };
 type RosterJson = {
   people: { name: string; dept?: string }[];
@@ -39,8 +40,8 @@ const I18N: Record<Lang, any> = {
     titlePh: "输入标题（默认含 SUIS GB）",
     date: "日期",
     lastCodePh: "上一轮排布码（粘贴最近一条；支持 v1/v2）",
-    status: (peo: number, rooms: number, pairs: number) =>
-      `人员: ${peo}，房间: ${rooms}（需 ${pairs} 位二班）`,
+    status: (peo: number, rooms: number, pairs: number, can: number) =>
+      `人员: ${peo}，房间: ${rooms}（需 ${pairs} 位双班；可双班: ${can}）`,
     peopleSel: "人员选择",
     formSel: "班级（Form）选择",
     next: "下一步",
@@ -58,6 +59,8 @@ const I18N: Record<Lang, any> = {
     colFormRoom: "班级 + 房号",
     colNameDept: "姓名 + 部门",
     languageLabel: "语言/Language",
+    ddLabel: "双班",
+    ddTooFew: (need: number, have: number) => `可双班人员不足：需要 ${need} 位，当前 ${have} 位。请勾选更多“双班”或减少房间数。`,
   },
   en: {
     setup: "Setup",
@@ -65,8 +68,8 @@ const I18N: Record<Lang, any> = {
     titlePh: "Title (includes SUIS GB by default)",
     date: "Date",
     lastCodePh: "Last rota code (paste the latest; supports v1/v2)",
-    status: (peo: number, rooms: number, pairs: number) =>
-      `People: ${peo}, Rooms: ${rooms} (need ${pairs} double-duty)`,
+    status: (peo: number, rooms: number, pairs: number, can: number) =>
+      `People: ${peo}, Rooms: ${rooms} (need ${pairs} double-duty; available: ${can})`,
     peopleSel: "People",
     formSel: "Forms",
     next: "Next",
@@ -84,6 +87,8 @@ const I18N: Record<Lang, any> = {
     colFormRoom: "Class + Room",
     colNameDept: "Name + Department",
     languageLabel: "语言/Language",
+    ddLabel: "Double",
+    ddTooFew: (need: number, have: number) => `Not enough double-duty people: need ${need}, have ${have}. Enable more "Double" or reduce rooms.`,
   },
 };
 
@@ -102,7 +107,7 @@ function parseRoomId(raw: string): { building: string; number: number; floor: nu
 }
 const pairKey = (a: string, b: string) => [a, b].sort().join("+");
 
-// 简单可复现的伪随机（用于无排布码时“打乱 + 轻微抖动”）
+// 伪随机（用于无排布码时的“打乱 + 微抖动”）
 function makeRNG(seed: number) {
   let s = seed >>> 0;
   return () => {
@@ -179,12 +184,10 @@ async function unpackRotaCodeCompat(code: string) {
   const crc = parts[2];
   const calc = crc32(b64).toString(16).toUpperCase().padStart(8, "0");
   if (calc !== crc) throw new Error("CRC mismatch");
-  // try plain (no compression)
   try {
     const raw = new TextDecoder().decode(fromBase64URL(b64));
     return JSON.parse(raw);
   } catch {}
-  // try native inflate if available
   if ((globalThis as any).DecompressionStream) {
     const u8 = fromBase64URL(b64);
     const ds = new (globalThis as any).DecompressionStream("deflate-raw");
@@ -208,6 +211,7 @@ async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
     name: p.name,
     dept: p.dept,
     active: true,
+    canDouble: true, //  默认允许 double duty
     assignedCount: 0,
   }));
 
@@ -241,24 +245,28 @@ function makeCost(
   randJitter: (() => number) | null,
   forbidRoomIds: Set<string>
 ): number {
-  // ---- 新增硬性限制：若 Hepburn He 且 slot 里有 12 年级房间，直接禁止 ----
+  // A) Double-duty 约束：双房间槽仅限 canDouble
+  if (slot.rooms.length === 2 && !p.canDouble) return 1e9;
+
+  // B) Hepburn He 不可去 12 年级
   if (p.name === FORBID_NAME) {
-    for (const rid of slot.rooms) {
-      if (forbidRoomIds.has(rid)) return 1e9; // 极大代价，相当于不可分配
-    }
+    for (const rid of slot.rooms) if (forbidRoomIds.has(rid)) return 1e9;
   }
 
+  // C) 避免重复（上一轮同房间/同对）
   const last = new Set(p.lastRooms || []);
   if (strong) {
     for (const r of slot.rooms) if (last.has(r)) return 1e6;
     if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) return 1e6;
   }
+
+  // D) 软代价：略微惩罚最近去过 & 已分配次数
   let c = 0;
   for (const r of slot.rooms) if (last.has(r)) c += 100;
   if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) c += 200;
   c += p.assignedCount * 5;
 
-  if (randJitter) c += Math.floor(randJitter() * 2); // 0/1 抖动打破固定解
+  if (randJitter) c += Math.floor(randJitter() * 2); // 0/1 抖动
   return c;
 }
 
@@ -343,7 +351,7 @@ function generateAssignment(
   const people = shufflePeople && randJitter ? shuffle(peopleRaw.slice(), randJitter) : peopleRaw.slice();
 
   const R = enabledRooms.length, P = people.length;
-  const D = Math.max(0, R - P);
+  const D = Math.max(0, R - P); // 需要的双班人数 = 需要的成对槽数
 
   const used = new Set<string>();
   const pairs1 = greedyAdjacentPairs(enabledRooms, D, used);
@@ -353,12 +361,13 @@ function generateAssignment(
     pairs = pairs.concat(extra);
   }
 
+  // 单间槽 = 未被成对占用的房间
   const singles: Slot[] = enabledRooms.filter((r) => !used.has(r.id)).map((r) => ({ id: r.id, rooms: [r.id] }));
-  const slots: Slot[] = [...pairs, ...singles];
+  const slots: Slot[] = [...pairs, ...singles]; // 槽数应当等于 P
 
   const base = hungarianAssign(people, slots, randJitter, forbidRoomIds);
 
-  // 兜底：任何遗漏的房间强行分给“当前最少的人”，但仍然要**尊重禁止规则**
+  // 正常情况下，此处不应再有遗漏；兜底亦遵守 canDouble + Hepburn 限制
   const assignedRooms = new Set(base.flatMap((a) => a.rooms));
   const still = enabledRooms.filter((r) => !assignedRooms.has(r.id));
   if (still.length) {
@@ -368,11 +377,13 @@ function generateAssignment(
 
     let pi = 0;
     for (const r of still) {
-      // 对于 12 年级房间，跳过 Hepburn He
       let chosen: Person | null = null;
       for (let k = 0; k < pool.length; k++) {
         const cand = pool[(pi + k) % pool.length];
-        if (!(cand.name === FORBID_NAME && forbidRoomIds.has(r.id))) {
+        // Hepburn 12 年级禁配
+        if (cand.name === FORBID_NAME && forbidRoomIds.has(r.id)) continue;
+        const cur = usedBy.get(cand.name) || 0;
+        if (cur === 0 || (cur >= 1 && cand.canDouble)) {
           chosen = cand;
           pi = (pi + k + 1) % pool.length;
           break;
@@ -382,7 +393,6 @@ function generateAssignment(
         base.push({ person: chosen.name, rooms: [r.id] });
         usedBy.set(chosen.name, (usedBy.get(chosen.name) || 0) + 1);
       }
-      // 若 chosen 仍为空，说明所有人都被禁（极端不可能场景），则不分配该房间
     }
   }
   return base;
@@ -424,7 +434,7 @@ export default function App() {
   // RotaCode + Toast
   const [generatedCode, setGeneratedCode] = useState("");
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null);
-  const showToast = (text: string, ms = 1600) => {
+  const showToast = (text: string, ms = 2000) => {
     const id = Date.now();
     setToast({ id, text });
     setTimeout(() => setToast((t) => (t && t.id === id ? null : t)), ms);
@@ -476,18 +486,18 @@ export default function App() {
   }, [rooms, allowedForms]);
 
   const statusText = useMemo(() => {
-    const activeCount = people.filter((p) => p.active).length;
+    const active = people.filter((p) => p.active);
+    const activeCount = active.length;
     const roomCount = filteredRooms.filter((r) => r.enabled).length;
     const needPairs = Math.max(0, roomCount - activeCount);
-    return L.status(activeCount, roomCount, needPairs);
+    const canDouble = active.filter((p) => p.canDouble).length;
+    return L.status(activeCount, roomCount, needPairs, canDouble);
   }, [people, filteredRooms, lang]);
 
   // === 计算“禁止分配”的房间集合（所有 form 以 12 开头）===
   const forbidRoomIds = useMemo(() => {
     const set = new Set<string>();
-    for (const r of rooms) {
-      if (r.form && /^12/.test(r.form)) set.add(r.id);
-    }
+    for (const r of rooms) if (r.form && /^12/.test(r.form)) set.add(r.id);
     return set;
   }, [rooms]);
 
@@ -501,14 +511,27 @@ export default function App() {
   function togglePerson(id: string) {
     setPeople((prev) => prev.map((p) => (p.id === id ? { ...p, active: !p.active } : p)));
   }
+  function toggleDouble(id: string) {
+    setPeople((prev) => prev.map((p) => (p.id === id ? { ...p, canDouble: !p.canDouble } : p)));
+  }
 
   function doGenerate() {
     // 是否存在“上一轮数据”
     const hasHistory = people.some((p) => (p.lastRooms?.length || 0) > 0 || p.lastPairKey);
-    // 无历史：随机
     const seed = randomSeed();
     const rng = makeRNG(seed);
     const randJitter = hasHistory ? null : rng;
+
+    // 可行性检查：可双班人数是否足够
+    const active = people.filter((p) => p.active);
+    const canDouble = active.filter((p) => p.canDouble).length;
+    const R = filteredRooms.filter((r) => r.enabled).length;
+    const P = active.length;
+    const need = Math.max(0, R - P);
+    if (need > canDouble) {
+      showToast(L.ddTooFew(need, canDouble));
+      return; // ❌ 阻止生成
+    }
 
     const A = generateAssignment(people, filteredRooms, randJitter, !hasHistory, forbidRoomIds);
     setAssignments(A);
@@ -520,7 +543,7 @@ export default function App() {
       setGeneratedCode(code);
       navigator.clipboard.writeText(code).then(
         () => showToast(L.copyOk),
-        () => showToast(L.codeBoxTitle) // 提示已生成，可手动复制
+        () => showToast(L.codeBoxTitle)
       );
     });
   }
@@ -596,14 +619,15 @@ export default function App() {
   const allForms = Array.from(new Set(rooms.map((r) => r.form || ""))).filter(Boolean).sort();
 
   // ======== 根据 isMobile 自适配样式 ========
-  const shellPad = isMobile ? "p-2" : "p-4";
-  const wrapW   = isMobile ? "max-w-full" : "max-w-6xl";
-  const cardPad = isMobile ? "p-3" : "p-4";
-  const headerText = isMobile ? "text-xl" : "text-2xl";
-  const listHeight = isMobile ? "h-[38vh]" : "h-64";
-  const tableText = isMobile ? "text-[12px] leading-tight" : "text-base";
-  const thPad = isMobile ? "p-1.5" : "p-2";
-  const tdPad = isMobile ? "p-1.5" : "p-2";
+  const isM = isMobile;
+  const shellPad = isM ? "p-2" : "p-4";
+  const wrapW   = isM ? "max-w-full" : "max-w-6xl";
+  const cardPad = isM ? "p-3" : "p-4";
+  const headerText = isM ? "text-xl" : "text-2xl";
+  const listHeight = isM ? "h-[38vh]" : "h-64";
+  const tableText = isM ? "text-[12px] leading-tight" : "text-base";
+  const thPad = isM ? "p-1.5" : "p-2";
+  const tdPad = isM ? "p-1.5" : "p-2";
 
   return (
     <div className="min-h-screen bg-black text-white">
@@ -642,21 +666,21 @@ export default function App() {
             {/* 标题 + 日期 + 排布码输入 */}
             <div className="flex flex-col gap-2 md:flex-row md:items-center">
               <input
-                className={`flex-1 rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isMobile ? "text-sm" : ""}`}
+                className={`flex-1 rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isM ? "text-sm" : ""}`}
                 placeholder={I18N[lang].titlePh}
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
               />
               <input
                 type="date"
-                className={`rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isMobile ? "text-sm" : ""}`}
+                className={`rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isM ? "text-sm" : ""}`}
                 value={dateStr}
                 onChange={(e) => setDateStr(e.target.value)}
                 aria-label={I18N[lang].date}
                 title={I18N[lang].date}
               />
               <input
-                className={`w-full md:w-[460px] rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isMobile ? "text-sm" : ""}`}
+                className={`w-full md:w-[460px] rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isM ? "text-sm" : ""}`}
                 placeholder={I18N[lang].lastCodePh}
                 value={rotaCodeIn}
                 onChange={(e) => setRotaCodeIn(e.target.value)}
@@ -667,22 +691,32 @@ export default function App() {
             <div className="mt-2 text-sm text-neutral-400">{statusText}</div>
 
             {/* 人员选择 & Form 选择 */}
-            <div className={`mt-3 grid grid-cols-1 ${isMobile ? "gap-3" : "md:grid-cols-3 gap-4"}`}>
-              {/* 人员 */}
+            <div className={`mt-3 grid grid-cols-1 ${isM ? "gap-3" : "md:grid-cols-3 gap-4"}`}>
+              {/* 人员（带“启用 + 双班”两个开关） */}
               <div className="bg-neutral-800 rounded-xl p-3">
                 <div className="font-semibold mb-2">{I18N[lang].peopleSel}</div>
-                <div className={`${listHeight} overflow-auto divide-y divide-neutral-700 ${isMobile ? "text-sm" : ""}`}>
-                  {/* 勾选列表按名字升序；分配时已引入随机 */}
+                <div className={`${listHeight} overflow-auto divide-y divide-neutral-700 ${isM ? "text-sm" : ""}`}>
                   {people.slice().sort((a, b) => a.name.localeCompare(b.name)).map((p) => (
-                    <label key={p.id} className="flex items-center gap-2 py-1">
-                      <input type="checkbox" checked={p.active} onChange={() => togglePerson(p.id)} />
-                      <span>{p.name}</span>
-                    </label>
+                    <div key={p.id} className="flex items-center justify-between py-1">
+                      <label className="flex items-center gap-2">
+                        <input type="checkbox" checked={p.active} onChange={() => togglePerson(p.id)} />
+                        <span>{p.name}</span>
+                      </label>
+                      <label className="flex items-center gap-2">
+                        <span className="text-neutral-400">{I18N[lang].ddLabel}</span>
+                        <input
+                          type="checkbox"
+                          checked={p.canDouble}
+                          onChange={() => toggleDouble(p.id)}
+                          title={I18N[lang].ddLabel}
+                        />
+                      </label>
+                    </div>
                   ))}
                 </div>
               </div>
 
-              {/* Form */}
+              {/* Form 选择 */}
               <div className="bg-neutral-800 rounded-xl p-3">
                 <div className="font-semibold mb-2">{I18N[lang].formSel}</div>
                 <div className="flex flex-wrap gap-2">
@@ -690,7 +724,7 @@ export default function App() {
                     <button
                       key={f}
                       onClick={() => toggleForm(f)}
-                      className={`${allowedForms.has(f) ? "bg-emerald-600" : "bg-neutral-700"} ${isMobile ? "px-2 py-1 text-xs" : "px-3 py-1.5 text-sm"} rounded-full`}
+                      className={`${allowedForms.has(f) ? "bg-emerald-600" : "bg-neutral-700"} ${isM ? "px-2 py-1 text-xs" : "px-3 py-1.5 text-sm"} rounded-full`}
                     >
                       {f}
                     </button>
@@ -702,7 +736,7 @@ export default function App() {
               <div className={`flex items-end`}>
                 <button
                   onClick={doGenerate}
-                  className={`w-full bg-blue-600 hover:bg-blue-700 rounded-xl ${isMobile ? "py-2 text-sm" : "py-3 font-semibold"}`}
+                  className={`w-full bg-blue-600 hover:bg-blue-700 rounded-xl ${isM ? "py-2 text-sm" : "py-3 font-semibold"}`}
                 >
                   {I18N[lang].next}
                 </button>
@@ -719,12 +753,12 @@ export default function App() {
           <div className={`bg-neutral-900 rounded-2xl ${cardPad} mb-3`}>
             <div className="flex items-center justify-between">
               <div className="font-semibold">{I18N[lang].codeBoxTitle}</div>
-              <button onClick={copyCode} className={`rounded bg-blue-600 hover:bg-blue-700 ${isMobile ? "px-2 py-1 text-sm" : "px-3 py-1.5"}`}>
+              <button onClick={copyCode} className={`rounded bg-blue-600 hover:bg-blue-700 ${isM ? "px-2 py-1 text-sm" : "px-3 py-1.5"}`}>
                 {I18N[lang].copy}
               </button>
             </div>
             <textarea
-              className={`w-full ${isMobile ? "h-24" : "h-28"} mt-2 rounded bg-neutral-800 border border-neutral-700 p-2 font-mono ${isMobile ? "text-[11px]" : "text-xs"}`}
+              className={`w-full ${isM ? "h-24" : "h-28"} mt-2 rounded bg-neutral-800 border border-neutral-700 p-2 font-mono ${isM ? "text-[11px]" : "text-xs"}`}
               readOnly
               value={generatedCode}
               onFocus={(e) => e.currentTarget.select()}
@@ -737,11 +771,11 @@ export default function App() {
             className={`bg-white text-black rounded-2xl ${cardPad} ${tableText}`}
           >
             {/* 页眉 */}
-            <div className={`flex items-start justify-between ${isMobile ? "gap-2" : ""}`}>
-              <div className={`${isMobile ? "text-base" : "text-xl"} font-bold`}>{title}</div>
+            <div className={`flex items-start justify-between ${isM ? "gap-2" : ""}`}>
+              <div className={`${isM ? "text-base" : "text-xl"} font-bold`}>{title}</div>
               <div className="text-right">
-                <div className={`${isMobile ? "text-[11px]" : "text-sm"}`}>{I18N[lang].date}</div>
-                <div className={`${isMobile ? "text-sm" : "font-semibold"}`}>{dateStr}</div>
+                <div className={`${isM ? "text-[11px]" : "text-sm"}`}>{I18N[lang].date}</div>
+                <div className={`${isM ? "text-sm" : "font-semibold"}`}>{dateStr}</div>
               </div>
             </div>
 
@@ -771,7 +805,7 @@ export default function App() {
                       const person = a?.person ?? "";
                       const dept = person ? (people.find((p) => p.name === person)?.dept ?? "") : "";
                       return (
-                        <tr key={r.id} className={`${isMobile ? "align-top" : ""}`}>
+                        <tr key={r.id} className={`${isM ? "align-top" : ""}`}>
                           <td className={`${tdPad} border whitespace-nowrap`}>{formRoom}</td>
                           <td className={`${tdPad} border break-words`}>
                             <span className="font-semibold">{person}</span>
@@ -786,14 +820,14 @@ export default function App() {
           </div>
 
           {/* 操作按钮 */}
-          <div className={`mt-3 flex ${isMobile ? "flex-col" : "flex-row"} gap-3`}>
-            <button onClick={() => setStep(1)} className={`rounded bg-neutral-700 hover:bg-neutral-600 ${isMobile ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
+          <div className={`mt-3 flex ${isM ? "flex-col" : "flex-row"} gap-3`}>
+            <button onClick={() => setStep(1)} className={`rounded bg-neutral-700 hover:bg-neutral-600 ${isM ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
               {I18N[lang].back}
             </button>
-            <button onClick={exportJPG} className={`rounded bg-emerald-600 hover:bg-emerald-700 ${isMobile ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
+            <button onClick={exportJPG} className={`rounded bg-emerald-600 hover:bg-emerald-700 ${isM ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
               {I18N[lang].exportJPG}
             </button>
-            <button onClick={copyJPGToClipboard} className={`rounded bg-amber-600 hover:bg-amber-700 ${isMobile ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
+            <button onClick={copyJPGToClipboard} className={`rounded bg-amber-600 hover:bg-amber-700 ${isM ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
               {I18N[lang].copyJPG}
             </button>
           </div>
