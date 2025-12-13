@@ -9,20 +9,20 @@ type Person = {
   name: string;
   dept?: string;
   active: boolean;
-  canDouble: boolean; //  是否允许 double duty
+  canDouble: boolean;
   assignedCount: number;
   lastRooms?: string[];
   lastPairKey?: string;
 };
 type Room = {
-  id: string;      // e.g. N102
-  form?: string;   // e.g. 9AG
+  id: string;
+  form?: string;
   building: string;
   number: number;
   floor: number;
   enabled: boolean;
 };
-type Slot = { id: string; rooms: string[] }; // 单间 or 成对房间（双班）
+type Slot = { id: string; rooms: string[] };
 type Assignment = { person: string; rooms: string[] };
 type RosterJson = {
   people: { name: string; dept?: string }[];
@@ -60,7 +60,8 @@ const I18N: Record<Lang, any> = {
     colNameDept: "姓名 + 部门",
     languageLabel: "语言/Language",
     ddLabel: "双班",
-    ddTooFew: (need: number, have: number) => `可双班人员不足：需要 ${need} 位，当前 ${have} 位。请勾选更多“双班”或减少房间数。`,
+    ddTooFew: (need: number, have: number) =>
+      `可双班人员不足：需要 ${need} 位，当前 ${have} 位。请勾选更多“双班”或减少房间数。`,
   },
   en: {
     setup: "Setup",
@@ -88,9 +89,57 @@ const I18N: Record<Lang, any> = {
     colNameDept: "Name + Department",
     languageLabel: "语言/Language",
     ddLabel: "Double",
-    ddTooFew: (need: number, have: number) => `Not enough double-duty people: need ${need}, have ${have}. Enable more "Double" or reduce rooms.`,
+    ddTooFew: (need: number, have: number) =>
+      `Not enough double-duty people: need ${need}, have ${have}. Enable more "Double" or reduce rooms.`,
   },
 };
+
+/** =========================
+ *   Dept color (from Key)
+ *  ========================= */
+type DeptStyle = { bg: string; fg: string; border?: string };
+
+function normalizeDept(raw?: string): string {
+  if (!raw) return "";
+  const s = raw.trim();
+  const lower = s.toLowerCase();
+
+  if (lower === "visual art") return "Art";
+  if (lower === "art") return "Art";
+  if (lower === "theater") return "Theatre";
+
+  if (lower === "red hc" || lower === "red house captain") return "Red House Captain";
+  if (lower === "green hc" || lower === "green house captain") return "Green House Captain";
+  if (lower === "blue hc" || lower === "blue house captain") return "Blue House Captain";
+  if (lower === "yellow hc" || lower === "yellow house captain") return "Yellow House Captain";
+
+  return s;
+}
+
+// 颜色按你给的 Key（近似 hex）
+const DEPT_STYLE: Record<string, DeptStyle> = {
+  Charity: { bg: "#D6A07E", fg: "#000000" },
+  Art: { bg: "#79C3E8", fg: "#000000" },
+  Community: { bg: "#D6FF4A", fg: "#000000" },
+  Academia: { bg: "#B59ACB", fg: "#000000" },
+  Media: { bg: "#4B235A", fg: "#FFFFFF" },
+  Sports: { bg: "#E59B1E", fg: "#000000" },
+  Music: { bg: "#FFFFFF", fg: "#000000", border: "#BDBDBD" },
+  Theatre: { bg: "#B9FFFF", fg: "#000000" },
+
+  "Red House Captain": { bg: "#D63A2E", fg: "#000000" },
+  "Green House Captain": { bg: "#6B7E55", fg: "#000000" },
+  "Blue House Captain": { bg: "#93A1AB", fg: "#000000" },
+  "Yellow House Captain": { bg: "#FFF06A", fg: "#000000" },
+
+  "no need": { bg: "#BDBDBD", fg: "#000000" },
+};
+
+function deptStyleOf(raw?: string): DeptStyle {
+  const dept = normalizeDept(raw);
+  if (!dept) return { bg: "#FFFFFF", fg: "#000000" };
+  return DEPT_STYLE[dept] || { bg: "#FFFFFF", fg: "#000000" };
+}
 
 /** =========================
  *        Utils
@@ -107,7 +156,6 @@ function parseRoomId(raw: string): { building: string; number: number; floor: nu
 }
 const pairKey = (a: string, b: string) => [a, b].sort().join("+");
 
-// 伪随机（用于无排布码时的“打乱 + 微抖动”）
 function makeRNG(seed: number) {
   let s = seed >>> 0;
   return () => {
@@ -155,8 +203,6 @@ function crc32(str: string) {
   }
   return (~c) >>> 0;
 }
-
-// v2: no compression
 async function packRotaCodeV2(payload: any) {
   const json = JSON.stringify(payload);
   const b64 = toBase64URL(new TextEncoder().encode(json));
@@ -174,7 +220,6 @@ async function unpackRotaCodeV2(code: string) {
   const u8 = fromBase64URL(b64);
   return JSON.parse(new TextDecoder().decode(u8));
 }
-// v1 compatibility (compressed or not)
 async function unpackRotaCodeCompat(code: string) {
   if (code.startsWith("ROTAv2.")) return unpackRotaCodeV2(code);
   if (!code.startsWith("ROTAv1.")) throw new Error("Unknown code");
@@ -211,7 +256,7 @@ async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
     name: p.name,
     dept: p.dept,
     active: true,
-    canDouble: true, //  默认允许 double duty
+    canDouble: true,
     assignedCount: 0,
   }));
 
@@ -234,8 +279,6 @@ async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
 /** =========================
  *        Matching
  *  ========================= */
-
-// 硬性限制：Hepburn He 不可去 12 开头的 form
 const FORBID_NAME = "Hepburn He";
 
 function makeCost(
@@ -245,28 +288,24 @@ function makeCost(
   randJitter: (() => number) | null,
   forbidRoomIds: Set<string>
 ): number {
-  // A) Double-duty 约束：双房间槽仅限 canDouble
   if (slot.rooms.length === 2 && !p.canDouble) return 1e9;
 
-  // B) Hepburn He 不可去 12 年级
   if (p.name === FORBID_NAME) {
     for (const rid of slot.rooms) if (forbidRoomIds.has(rid)) return 1e9;
   }
 
-  // C) 避免重复（上一轮同房间/同对）
   const last = new Set(p.lastRooms || []);
   if (strong) {
     for (const r of slot.rooms) if (last.has(r)) return 1e6;
     if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) return 1e6;
   }
 
-  // D) 软代价：略微惩罚最近去过 & 已分配次数
   let c = 0;
   for (const r of slot.rooms) if (last.has(r)) c += 100;
   if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) c += 200;
   c += p.assignedCount * 5;
 
-  if (randJitter) c += Math.floor(randJitter() * 2); // 0/1 抖动
+  if (randJitter) c += Math.floor(randJitter() * 2);
   return c;
 }
 
@@ -351,7 +390,7 @@ function generateAssignment(
   const people = shufflePeople && randJitter ? shuffle(peopleRaw.slice(), randJitter) : peopleRaw.slice();
 
   const R = enabledRooms.length, P = people.length;
-  const D = Math.max(0, R - P); // 需要的双班人数 = 需要的成对槽数
+  const D = Math.max(0, R - P);
 
   const used = new Set<string>();
   const pairs1 = greedyAdjacentPairs(enabledRooms, D, used);
@@ -361,26 +400,22 @@ function generateAssignment(
     pairs = pairs.concat(extra);
   }
 
-  // 单间槽 = 未被成对占用的房间
   const singles: Slot[] = enabledRooms.filter((r) => !used.has(r.id)).map((r) => ({ id: r.id, rooms: [r.id] }));
-  const slots: Slot[] = [...pairs, ...singles]; // 槽数应当等于 P
+  const slots: Slot[] = [...pairs, ...singles];
 
   const base = hungarianAssign(people, slots, randJitter, forbidRoomIds);
 
-  // 正常情况下，此处不应再有遗漏；兜底亦遵守 canDouble + Hepburn 限制
   const assignedRooms = new Set(base.flatMap((a) => a.rooms));
   const still = enabledRooms.filter((r) => !assignedRooms.has(r.id));
   if (still.length) {
     const usedBy: Map<string, number> = new Map();
     for (const a of base) usedBy.set(a.person, (usedBy.get(a.person) || 0) + a.rooms.length);
     const pool = people.slice().sort((a, b) => (usedBy.get(a.name) || 0) - (usedBy.get(b.name) || 0));
-
     let pi = 0;
     for (const r of still) {
       let chosen: Person | null = null;
       for (let k = 0; k < pool.length; k++) {
         const cand = pool[(pi + k) % pool.length];
-        // Hepburn 12 年级禁配
         if (cand.name === FORBID_NAME && forbidRoomIds.has(r.id)) continue;
         const cur = usedBy.get(cand.name) || 0;
         if (cur === 0 || (cur >= 1 && cand.canDouble)) {
@@ -402,12 +437,10 @@ function generateAssignment(
  *        Component
  *  ========================= */
 export default function App() {
-  // language
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("lang") as Lang) || "zh");
   const L = I18N[lang];
   useEffect(() => { localStorage.setItem("lang", lang); }, [lang]);
 
-  // device detection（iPad 归“电脑”）
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
     const ua = navigator.userAgent || "";
@@ -417,12 +450,10 @@ export default function App() {
     setIsMobile(!isiPad && (isAndroidPhone || isiPhoneOriPod));
   }, []);
 
-  // data
   const [loaded, setLoaded] = useState(false);
   const [people, setPeople] = useState<Person[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
 
-  // wizard
   const [step, setStep] = useState<1 | 2>(1);
   const [title, setTitle] = useState("Morning Announcement Rota — SUIS GB");
   const [dateStr, setDateStr] = useState(() => new Date().toISOString().slice(0, 10));
@@ -431,7 +462,6 @@ export default function App() {
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const boardRef = useRef<HTMLDivElement>(null);
 
-  // RotaCode + Toast
   const [generatedCode, setGeneratedCode] = useState("");
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null);
   const showToast = (text: string, ms = 2000) => {
@@ -440,7 +470,6 @@ export default function App() {
     setTimeout(() => setToast((t) => (t && t.id === id ? null : t)), ms);
   };
 
-  // load roster
   useEffect(() => {
     loadRoster()
       .then(({ people, rooms }) => {
@@ -456,7 +485,6 @@ export default function App() {
       });
   }, []);
 
-  // import last rota
   useEffect(() => {
     if (!rotaCodeIn.trim() || !people.length) return;
     (async () => {
@@ -480,7 +508,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rotaCodeIn, people.length, lang]);
 
-  // helpers
   const filteredRooms = useMemo(() => {
     return rooms.map((r) => ({ ...r, enabled: r.form ? allowedForms.has(r.form) : true }));
   }, [rooms, allowedForms]);
@@ -494,7 +521,6 @@ export default function App() {
     return L.status(activeCount, roomCount, needPairs, canDouble);
   }, [people, filteredRooms, lang]);
 
-  // === 计算“禁止分配”的房间集合（所有 form 以 12 开头）===
   const forbidRoomIds = useMemo(() => {
     const set = new Set<string>();
     for (const r of rooms) if (r.form && /^12/.test(r.form)) set.add(r.id);
@@ -516,13 +542,11 @@ export default function App() {
   }
 
   function doGenerate() {
-    // 是否存在“上一轮数据”
     const hasHistory = people.some((p) => (p.lastRooms?.length || 0) > 0 || p.lastPairKey);
     const seed = randomSeed();
     const rng = makeRNG(seed);
     const randJitter = hasHistory ? null : rng;
 
-    // 可行性检查：可双班人数是否足够
     const active = people.filter((p) => p.active);
     const canDouble = active.filter((p) => p.canDouble).length;
     const R = filteredRooms.filter((r) => r.enabled).length;
@@ -530,14 +554,13 @@ export default function App() {
     const need = Math.max(0, R - P);
     if (need > canDouble) {
       showToast(L.ddTooFew(need, canDouble));
-      return; // ❌ 阻止生成
+      return;
     }
 
     const A = generateAssignment(people, filteredRooms, randJitter, !hasHistory, forbidRoomIds);
     setAssignments(A);
     setStep(2);
 
-    // 生成 v2 排布码并复制
     const payload = { date: dateStr, assignments: A };
     packRotaCodeV2(payload).then((code) => {
       setGeneratedCode(code);
@@ -548,7 +571,6 @@ export default function App() {
     });
   }
 
-  // 导出 JPG（下载）
   async function exportJPG() {
     if (!boardRef.current) return;
     const { toJpeg } = await import("html-to-image");
@@ -563,7 +585,6 @@ export default function App() {
     link.click();
   }
 
-  // 复制 JPG 到剪贴板
   async function copyJPGToClipboard() {
     if (!boardRef.current) return;
     const canWrite =
@@ -582,10 +603,8 @@ export default function App() {
         backgroundColor: "#ffffff",
       });
       const res = await fetch(dataUrl);
-      const blob = await res.blob(); // image/jpeg
-      await (navigator as any).clipboard.write([
-        new (window as any).ClipboardItem({ "image/jpeg": blob }),
-      ]);
+      const blob = await res.blob();
+      await (navigator as any).clipboard.write([new (window as any).ClipboardItem({ "image/jpeg": blob })]);
       showToast(L.copyJPGOk);
     } catch (e) {
       console.warn(e);
@@ -602,7 +621,6 @@ export default function App() {
     }
   }
 
-  // grade parse for sorting 9→12
   const gradeOf = (form?: string) => {
     if (!form) return 999;
     const m = form.match(/^(\d{1,2})/);
@@ -618,10 +636,9 @@ export default function App() {
 
   const allForms = Array.from(new Set(rooms.map((r) => r.form || ""))).filter(Boolean).sort();
 
-  // ======== 根据 isMobile 自适配样式 ========
   const isM = isMobile;
   const shellPad = isM ? "p-2" : "p-4";
-  const wrapW   = isM ? "max-w-full" : "max-w-6xl";
+  const wrapW = isM ? "max-w-full" : "max-w-6xl";
   const cardPad = isM ? "p-3" : "p-4";
   const headerText = isM ? "text-xl" : "text-2xl";
   const listHeight = isM ? "h-[38vh]" : "h-64";
@@ -631,7 +648,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-black text-white">
-      {/* Toast */}
       {toast && (
         <div className="fixed top-4 right-4 z-50">
           <div className="bg-white text-black rounded-xl shadow px-4 py-2">{toast.text}</div>
@@ -639,10 +655,9 @@ export default function App() {
       )}
 
       <div className={`${wrapW} mx-auto ${shellPad}`}>
-        <div className={`flex items-center justify-between`}>
+        <div className="flex items-center justify-between">
           <div className={`${headerText} font-bold`}>{step === 1 ? I18N[lang].setup : I18N[lang].result}</div>
 
-          {/* 语言切换（准备界面） */}
           {step === 1 && (
             <div className="flex items-center gap-2">
               <span className="text-sm text-neutral-400">{I18N[lang].languageLabel}</span>
@@ -659,11 +674,9 @@ export default function App() {
         </div>
       </div>
 
-      {/* STEP 1 */}
       {step === 1 && (
         <div className={`${wrapW} mx-auto ${shellPad}`}>
           <div className={`bg-neutral-900 rounded-2xl ${cardPad}`}>
-            {/* 标题 + 日期 + 排布码输入 */}
             <div className="flex flex-col gap-2 md:flex-row md:items-center">
               <input
                 className={`flex-1 rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isM ? "text-sm" : ""}`}
@@ -687,36 +700,42 @@ export default function App() {
               />
             </div>
 
-            {/* 状态条 */}
             <div className="mt-2 text-sm text-neutral-400">{statusText}</div>
 
-            {/* 人员选择 & Form 选择 */}
             <div className={`mt-3 grid grid-cols-1 ${isM ? "gap-3" : "md:grid-cols-3 gap-4"}`}>
-              {/* 人员（带“启用 + 双班”两个开关） */}
               <div className="bg-neutral-800 rounded-xl p-3">
                 <div className="font-semibold mb-2">{I18N[lang].peopleSel}</div>
                 <div className={`${listHeight} overflow-auto divide-y divide-neutral-700 ${isM ? "text-sm" : ""}`}>
-                  {people.slice().sort((a, b) => a.name.localeCompare(b.name)).map((p) => (
-                    <div key={p.id} className="flex items-center justify-between py-1">
-                      <label className="flex items-center gap-2">
-                        <input type="checkbox" checked={p.active} onChange={() => togglePerson(p.id)} />
-                        <span>{p.name}</span>
-                      </label>
-                      <label className="flex items-center gap-2">
-                        <span className="text-neutral-400">{I18N[lang].ddLabel}</span>
-                        <input
-                          type="checkbox"
-                          checked={p.canDouble}
-                          onChange={() => toggleDouble(p.id)}
-                          title={I18N[lang].ddLabel}
-                        />
-                      </label>
-                    </div>
-                  ))}
+                  {people.slice().sort((a, b) => a.name.localeCompare(b.name)).map((p) => {
+                    const st = deptStyleOf(p.dept);
+                    const dName = normalizeDept(p.dept);
+                    return (
+                      <div key={p.id} className="flex items-center justify-between py-1">
+                        <label className="flex items-center gap-2">
+                          <input type="checkbox" checked={p.active} onChange={() => togglePerson(p.id)} />
+                          <span
+                            title={dName || ""}
+                            style={{
+                              width: 12,
+                              height: 12,
+                              borderRadius: 999,
+                              background: st.bg,
+                              border: `1px solid ${st.border || "rgba(0,0,0,0.25)"}`,
+                              display: "inline-block",
+                            }}
+                          />
+                          <span>{p.name}</span>
+                        </label>
+                        <label className="flex items-center gap-2">
+                          <span className="text-neutral-400">{I18N[lang].ddLabel}</span>
+                          <input type="checkbox" checked={p.canDouble} onChange={() => toggleDouble(p.id)} />
+                        </label>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
-              {/* Form 选择 */}
               <div className="bg-neutral-800 rounded-xl p-3">
                 <div className="font-semibold mb-2">{I18N[lang].formSel}</div>
                 <div className="flex flex-wrap gap-2">
@@ -732,8 +751,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 下一步 */}
-              <div className={`flex items-end`}>
+              <div className="flex items-end">
                 <button
                   onClick={doGenerate}
                   className={`w-full bg-blue-600 hover:bg-blue-700 rounded-xl ${isM ? "py-2 text-sm" : "py-3 font-semibold"}`}
@@ -746,10 +764,8 @@ export default function App() {
         </div>
       )}
 
-      {/* STEP 2 */}
       {step === 2 && (
         <div className={`${wrapW} mx-auto ${shellPad}`}>
-          {/* 排布码直接展示 */}
           <div className={`bg-neutral-900 rounded-2xl ${cardPad} mb-3`}>
             <div className="flex items-center justify-between">
               <div className="font-semibold">{I18N[lang].codeBoxTitle}</div>
@@ -765,12 +781,7 @@ export default function App() {
             />
           </div>
 
-          {/* 成品卡片 */}
-          <div
-            ref={boardRef}
-            className={`bg-white text-black rounded-2xl ${cardPad} ${tableText}`}
-          >
-            {/* 页眉 */}
+          <div ref={boardRef} className={`bg-white text-black rounded-2xl ${cardPad} ${tableText}`}>
             <div className={`flex items-start justify-between ${isM ? "gap-2" : ""}`}>
               <div className={`${isM ? "text-base" : "text-xl"} font-bold`}>{title}</div>
               <div className="text-right">
@@ -779,8 +790,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* 表格 */}
-            <div className={`mt-3 overflow-x-auto`}>
+            <div className="mt-3 overflow-x-auto">
               <table className="w-full table-fixed border border-gray-300">
                 <thead className="bg-gray-100 sticky top-0 z-10">
                   <tr>
@@ -792,7 +802,6 @@ export default function App() {
                   {rooms
                     .filter((r) => filteredRooms.find((fr) => fr.id === r.id)?.enabled)
                     .sort((a, b) => {
-                      // 先 9→12 年级，再 building→floor→number
                       const ga = gradeOf(a.form), gb = gradeOf(b.form);
                       if (ga !== gb) return ga - gb;
                       if (a.building !== b.building) return a.building.localeCompare(b.building);
@@ -802,14 +811,35 @@ export default function App() {
                     .map((r) => {
                       const a = assignments.find((x) => x.rooms.includes(r.id));
                       const formRoom = r.form ? `${r.form} ${r.id}` : r.id;
-                      const person = a?.person ?? "";
-                      const dept = person ? (people.find((p) => p.name === person)?.dept ?? "") : "";
+
+                      const personName = a?.person ?? "";
+                      const rawDept = personName ? (people.find((p) => p.name === personName)?.dept ?? "") : "";
+                      const dept = normalizeDept(rawDept);
+                      const st = deptStyleOf(rawDept);
+
+                      // ✅ 右侧整格上色：没有人就不染色
+                      const cellStyle: React.CSSProperties = personName
+                        ? {
+                            background: st.bg,
+                            color: st.fg,
+                          }
+                        : {};
+
+                      // 让格子边框仍清晰
+                      const innerBorder = st.border || "rgba(0,0,0,0.12)";
+
                       return (
                         <tr key={r.id} className={`${isM ? "align-top" : ""}`}>
                           <td className={`${tdPad} border whitespace-nowrap`}>{formRoom}</td>
-                          <td className={`${tdPad} border break-words`}>
-                            <span className="font-semibold">{person}</span>
-                            {dept ? <span className="text-neutral-600"> {dept}</span> : null}
+                          <td
+                            className={`${tdPad} border break-words`}
+                            style={{
+                              ...cellStyle,
+                              borderColor: personName ? innerBorder : undefined,
+                            }}
+                          >
+                            <span style={{ fontWeight: 700 }}>{personName}</span>
+                            {dept ? <span style={{ opacity: 0.92, marginLeft: 8, fontWeight: 600 }}>{dept}</span> : null}
                           </td>
                         </tr>
                       );
@@ -819,7 +849,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* 操作按钮 */}
           <div className={`mt-3 flex ${isM ? "flex-col" : "flex-row"} gap-3`}>
             <button onClick={() => setStep(1)} className={`rounded bg-neutral-700 hover:bg-neutral-600 ${isM ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
               {I18N[lang].back}
