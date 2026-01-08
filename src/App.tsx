@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import Munkres from "munkres-js";
 
 /** =========================
- *        Types
- *  ========================= */
+ * Types
+ * ========================= */
 type Person = {
   id: string;
   name: string;
@@ -31,8 +31,8 @@ type RosterJson = {
 type Lang = "zh" | "en";
 
 /** =========================
- *        I18N
- *  ========================= */
+ * I18N
+ * ========================= */
 const I18N: Record<Lang, any> = {
   zh: {
     setup: "准备界面",
@@ -46,10 +46,10 @@ const I18N: Record<Lang, any> = {
     formSel: "班级（Form）选择",
     next: "下一步",
     back: "返回",
-    exportJPG: "下载 JPG",
+    exportJPG: "保存/分享 JPG",
     copyJPG: "复制 JPG",
     copyJPGOk: "JPG 已复制",
-    copyJPGFail: "当前浏览器不支持复制 JPG，请改用“下载 JPG”",
+    copyJPGFail: "当前浏览器不支持复制 JPG，请使用保存按钮",
     codeBoxTitle: "排布码（已生成，粘贴到下一轮以避免重复）",
     copy: "复制",
     copyOk: "排布码已复制",
@@ -75,10 +75,10 @@ const I18N: Record<Lang, any> = {
     formSel: "Forms",
     next: "Next",
     back: "Back",
-    exportJPG: "Download JPG",
+    exportJPG: "Save/Share JPG",
     copyJPG: "Copy JPG",
     copyJPGOk: "JPG copied",
-    copyJPGFail: "Clipboard image not supported, please use Download JPG",
+    copyJPGFail: "Clipboard image not supported, please use Save button",
     codeBoxTitle: "Rota Code (paste next time to avoid repeats)",
     copy: "Copy",
     copyOk: "Rota code copied",
@@ -95,8 +95,8 @@ const I18N: Record<Lang, any> = {
 };
 
 /** =========================
- *   Dept color (from Key)
- *  ========================= */
+ * Dept color (from Key)
+ * ========================= */
 type DeptStyle = { bg: string; fg: string; border?: string };
 
 function normalizeDept(raw?: string): string {
@@ -116,7 +116,6 @@ function normalizeDept(raw?: string): string {
   return s;
 }
 
-// 颜色按你给的 Key（近似 hex）
 const DEPT_STYLE: Record<string, DeptStyle> = {
   Charity: { bg: "#D6A07E", fg: "#000000" },
   Art: { bg: "#79C3E8", fg: "#000000" },
@@ -142,8 +141,8 @@ function deptStyleOf(raw?: string): DeptStyle {
 }
 
 /** =========================
- *        Utils
- *  ========================= */
+ * Utils
+ * ========================= */
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 function parseRoomId(raw: string): { building: string; number: number; floor: number } | null {
@@ -277,32 +276,31 @@ async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
 }
 
 /** =========================
- *        Matching
- *  ========================= */
-const FORBID_NAME = "Hepburn He";
-
+ * Matching
+ * ========================= */
 function makeCost(
   p: Person,
   slot: Slot,
   strong: boolean,
-  randJitter: (() => number) | null,
-  forbidRoomIds: Set<string>
+  randJitter: (() => number) | null
 ): number {
+  // If slot needs 2 rooms but person can't double, impossible cost
   if (slot.rooms.length === 2 && !p.canDouble) return 1e9;
 
-  if (p.name === FORBID_NAME) {
-    for (const rid of slot.rooms) if (forbidRoomIds.has(rid)) return 1e9;
-  }
-
+  // History penalty
   const last = new Set(p.lastRooms || []);
   if (strong) {
+    // Strong penalty if any room was used last time
     for (const r of slot.rooms) if (last.has(r)) return 1e6;
+    // Strong penalty if exact pair repeated
     if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) return 1e6;
   }
 
   let c = 0;
+  // Soft penalty
   for (const r of slot.rooms) if (last.has(r)) c += 100;
   if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) c += 200;
+  
   c += p.assignedCount * 5;
 
   if (randJitter) c += Math.floor(randJitter() * 2);
@@ -355,14 +353,13 @@ function fillPairsByNearest(rooms: Room[], need: number, used: Set<string>): Slo
 function hungarianAssign(
   people: Person[],
   slots: Slot[],
-  randJitter: (() => number) | null,
-  forbidRoomIds: Set<string>
+  randJitter: (() => number) | null
 ): Assignment[] {
   const P = people.length, S = slots.length, N = Math.max(P, S);
   const M: number[][] = Array.from({ length: N }, () => Array(N).fill(0));
   for (let i = 0; i < N; i++) {
     for (let j = 0; j < N; j++) {
-      if (i < P && j < S) M[i][j] = makeCost(people[i], slots[j], true, randJitter, forbidRoomIds);
+      if (i < P && j < S) M[i][j] = makeCost(people[i], slots[j], true, randJitter);
       else if (i < P && j >= S) M[i][j] = 500 + (randJitter ? Math.floor(randJitter() * 2) : 0);
       else if (i >= P && j < S) M[i][j] = 1000 + (randJitter ? Math.floor(randJitter() * 2) : 0);
       else M[i][j] = 0;
@@ -380,8 +377,7 @@ function generateAssignment(
   peopleIn: Person[],
   roomsIn: Room[],
   randJitter: (() => number) | null,
-  shufflePeople: boolean,
-  forbidRoomIds: Set<string>
+  shufflePeople: boolean
 ): Assignment[] {
   const peopleRaw = peopleIn.filter((p) => p.active);
   const enabledRooms = roomsIn.filter((r) => r.enabled);
@@ -403,8 +399,9 @@ function generateAssignment(
   const singles: Slot[] = enabledRooms.filter((r) => !used.has(r.id)).map((r) => ({ id: r.id, rooms: [r.id] }));
   const slots: Slot[] = [...pairs, ...singles];
 
-  const base = hungarianAssign(people, slots, randJitter, forbidRoomIds);
+  const base = hungarianAssign(people, slots, randJitter);
 
+  // Fill remaining gaps if any
   const assignedRooms = new Set(base.flatMap((a) => a.rooms));
   const still = enabledRooms.filter((r) => !assignedRooms.has(r.id));
   if (still.length) {
@@ -416,7 +413,6 @@ function generateAssignment(
       let chosen: Person | null = null;
       for (let k = 0; k < pool.length; k++) {
         const cand = pool[(pi + k) % pool.length];
-        if (cand.name === FORBID_NAME && forbidRoomIds.has(r.id)) continue;
         const cur = usedBy.get(cand.name) || 0;
         if (cur === 0 || (cur >= 1 && cand.canDouble)) {
           chosen = cand;
@@ -434,21 +430,12 @@ function generateAssignment(
 }
 
 /** =========================
- *        Component
- *  ========================= */
+ * Component
+ * ========================= */
 export default function App() {
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("lang") as Lang) || "zh");
   const L = I18N[lang];
   useEffect(() => { localStorage.setItem("lang", lang); }, [lang]);
-
-  const [isMobile, setIsMobile] = useState(false);
-  useEffect(() => {
-    const ua = navigator.userAgent || "";
-    const isiPad = /iPad/i.test(ua) || (navigator.platform === "MacIntel" && (navigator as any).maxTouchPoints > 1);
-    const isAndroidPhone = /Android/i.test(ua) && /Mobile/i.test(ua);
-    const isiPhoneOriPod = /iPhone|iPod/i.test(ua);
-    setIsMobile(!isiPad && (isAndroidPhone || isiPhoneOriPod));
-  }, []);
 
   const [loaded, setLoaded] = useState(false);
   const [people, setPeople] = useState<Person[]>([]);
@@ -521,12 +508,6 @@ export default function App() {
     return L.status(activeCount, roomCount, needPairs, canDouble);
   }, [people, filteredRooms, lang]);
 
-  const forbidRoomIds = useMemo(() => {
-    const set = new Set<string>();
-    for (const r of rooms) if (r.form && /^12/.test(r.form)) set.add(r.id);
-    return set;
-  }, [rooms]);
-
   function toggleForm(form: string) {
     setAllowedForms((prev) => {
       const n = new Set(prev);
@@ -557,7 +538,7 @@ export default function App() {
       return;
     }
 
-    const A = generateAssignment(people, filteredRooms, randJitter, !hasHistory, forbidRoomIds);
+    const A = generateAssignment(people, filteredRooms, randJitter, !hasHistory);
     setAssignments(A);
     setStep(2);
 
@@ -571,44 +552,55 @@ export default function App() {
     });
   }
 
-  async function exportJPG() {
+  // Use Web Share API if available, else copy to clipboard, else download
+  async function shareOrCopyJPG() {
     if (!boardRef.current) return;
-    const { toJpeg } = await import("html-to-image");
-    const dataUrl = await toJpeg(boardRef.current, {
-      quality: 0.95,
-      pixelRatio: isMobile ? 2 : 3,
-      backgroundColor: "#ffffff",
-    });
-    const link = document.createElement("a");
-    link.href = dataUrl;
-    link.download = `${title.replace(/\s+/g, "_")}_${dateStr}.jpg`;
-    link.click();
-  }
-
-  async function copyJPGToClipboard() {
-    if (!boardRef.current) return;
-    const canWrite =
-      !!(navigator as any).clipboard &&
-      typeof (navigator as any).clipboard.write === "function" &&
-      typeof (window as any).ClipboardItem !== "undefined";
-    if (!canWrite) {
-      showToast(L.copyJPGFail);
-      return;
-    }
     try {
       const { toJpeg } = await import("html-to-image");
       const dataUrl = await toJpeg(boardRef.current, {
-        quality: 0.92,
-        pixelRatio: isMobile ? 2 : 3,
+        quality: 0.95,
+        pixelRatio: 3, // High quality for everyone
         backgroundColor: "#ffffff",
       });
+      
       const res = await fetch(dataUrl);
       const blob = await res.blob();
-      await (navigator as any).clipboard.write([new (window as any).ClipboardItem({ "image/jpeg": blob })]);
-      showToast(L.copyJPGOk);
+      const file = new File([blob], `${title.replace(/\s+/g, "_")}_${dateStr}.jpg`, { type: "image/jpeg" });
+
+      // Native Share (Mobile)
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: title,
+          text: dateStr,
+        });
+        return;
+      }
+
+      // Clipboard Fallback
+      const canWrite =
+        typeof navigator.clipboard?.write === "function" &&
+        typeof ClipboardItem !== "undefined";
+        
+      if (canWrite) {
+        await navigator.clipboard.write([new ClipboardItem({ "image/jpeg": blob })]);
+        showToast(L.copyJPGOk);
+        return;
+      }
+
+      // Download Fallback
+      throw new Error("No share or clipboard support");
     } catch (e) {
       console.warn(e);
-      showToast(L.copyJPGFail);
+      // Fallback to simple download
+      if (boardRef.current) {
+        const { toJpeg } = await import("html-to-image");
+        const url = await toJpeg(boardRef.current, { quality: 0.95, pixelRatio: 3, backgroundColor: "#fff" });
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${title.replace(/\s+/g, "_")}_${dateStr}.jpg`;
+        link.click();
+      }
     }
   }
 
@@ -636,31 +628,21 @@ export default function App() {
 
   const allForms = Array.from(new Set(rooms.map((r) => r.form || ""))).filter(Boolean).sort();
 
-  const isM = isMobile;
-  const shellPad = isM ? "p-2" : "p-4";
-  const wrapW = isM ? "max-w-full" : "max-w-6xl";
-  const cardPad = isM ? "p-3" : "p-4";
-  const headerText = isM ? "text-xl" : "text-2xl";
-  const listHeight = isM ? "h-[38vh]" : "h-64";
-  const tableText = isM ? "text-[12px] leading-tight" : "text-base";
-  const thPad = isM ? "p-1.5" : "p-2";
-  const tdPad = isM ? "p-1.5" : "p-2";
-
   return (
     <div className="min-h-screen bg-black text-white">
       {toast && (
-        <div className="fixed top-4 right-4 z-50">
-          <div className="bg-white text-black rounded-xl shadow px-4 py-2">{toast.text}</div>
+        <div className="fixed bottom-8 left-1/2 transform -translate-x-1/2 z-50 w-max max-w-[90vw]">
+          <div className="bg-white text-black rounded-full shadow-lg px-6 py-3 font-medium text-center">{toast.text}</div>
         </div>
       )}
 
-      <div className={`${wrapW} mx-auto ${shellPad}`}>
-        <div className="flex items-center justify-between">
-          <div className={`${headerText} font-bold`}>{step === 1 ? I18N[lang].setup : I18N[lang].result}</div>
+      <div className="max-w-6xl mx-auto p-4">
+        <div className="flex items-center justify-between mb-4">
+          <div className="text-xl md:text-2xl font-bold">{step === 1 ? I18N[lang].setup : I18N[lang].result}</div>
 
           {step === 1 && (
             <div className="flex items-center gap-2">
-              <span className="text-sm text-neutral-400">{I18N[lang].languageLabel}</span>
+              <span className="text-sm text-neutral-400 hidden md:inline">{I18N[lang].languageLabel}</span>
               <select
                 value={lang}
                 onChange={(e) => setLang(e.target.value as Lang)}
@@ -675,60 +657,53 @@ export default function App() {
       </div>
 
       {step === 1 && (
-        <div className={`${wrapW} mx-auto ${shellPad}`}>
-          <div className={`bg-neutral-900 rounded-2xl ${cardPad}`}>
-            <div className="flex flex-col gap-2 md:flex-row md:items-center">
+        <div className="max-w-6xl mx-auto p-2 md:p-4">
+          <div className="bg-neutral-900 rounded-2xl p-4 md:p-6 shadow-xl">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center">
               <input
-                className={`flex-1 rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isM ? "text-sm" : ""}`}
+                className="flex-1 rounded-lg px-4 py-3 bg-neutral-800 border border-neutral-700 text-sm md:text-base focus:ring-2 focus:ring-blue-500 outline-none"
                 placeholder={I18N[lang].titlePh}
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
               />
               <input
                 type="date"
-                className={`rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isM ? "text-sm" : ""}`}
+                className="rounded-lg px-4 py-3 bg-neutral-800 border border-neutral-700 text-sm md:text-base outline-none"
                 value={dateStr}
                 onChange={(e) => setDateStr(e.target.value)}
-                aria-label={I18N[lang].date}
-                title={I18N[lang].date}
               />
               <input
-                className={`w-full md:w-[460px] rounded px-3 py-2 bg-neutral-800 border border-neutral-700 ${isM ? "text-sm" : ""}`}
+                className="w-full md:w-[460px] rounded-lg px-4 py-3 bg-neutral-800 border border-neutral-700 text-sm md:text-base outline-none"
                 placeholder={I18N[lang].lastCodePh}
                 value={rotaCodeIn}
                 onChange={(e) => setRotaCodeIn(e.target.value)}
               />
             </div>
 
-            <div className="mt-2 text-sm text-neutral-400">{statusText}</div>
+            <div className="mt-3 text-xs md:text-sm text-neutral-400 px-1">{statusText}</div>
 
-            <div className={`mt-3 grid grid-cols-1 ${isM ? "gap-3" : "md:grid-cols-3 gap-4"}`}>
-              <div className="bg-neutral-800 rounded-xl p-3">
-                <div className="font-semibold mb-2">{I18N[lang].peopleSel}</div>
-                <div className={`${listHeight} overflow-auto divide-y divide-neutral-700 ${isM ? "text-sm" : ""}`}>
+            {/* Layout: Mobile = Stacked, Desktop = 3 Columns */}
+            <div className="mt-4 flex flex-col md:grid md:grid-cols-3 gap-4 h-auto md:h-[600px]">
+              
+              {/* People Column */}
+              <div className="bg-neutral-800 rounded-xl p-3 flex flex-col h-[40vh] md:h-auto">
+                <div className="font-semibold mb-2 px-1">{I18N[lang].peopleSel}</div>
+                <div className="flex-1 overflow-y-auto min-h-0 divide-y divide-neutral-700 pr-1">
                   {people.slice().sort((a, b) => a.name.localeCompare(b.name)).map((p) => {
                     const st = deptStyleOf(p.dept);
-                    const dName = normalizeDept(p.dept);
                     return (
-                      <div key={p.id} className="flex items-center justify-between py-1">
-                        <label className="flex items-center gap-2">
-                          <input type="checkbox" checked={p.active} onChange={() => togglePerson(p.id)} />
+                      <div key={p.id} className="flex items-center justify-between py-2">
+                        <label className="flex items-center gap-3 cursor-pointer flex-1">
+                          <input type="checkbox" className="w-5 h-5 rounded accent-blue-600" checked={p.active} onChange={() => togglePerson(p.id)} />
                           <span
-                            title={dName || ""}
-                            style={{
-                              width: 12,
-                              height: 12,
-                              borderRadius: 999,
-                              background: st.bg,
-                              border: `1px solid ${st.border || "rgba(0,0,0,0.25)"}`,
-                              display: "inline-block",
-                            }}
+                            style={{ width: 12, height: 12, borderRadius: 999, background: st.bg, border: `1px solid ${st.border || "rgba(0,0,0,0.25)"}` }}
+                            className="shrink-0"
                           />
-                          <span>{p.name}</span>
+                          <span className="text-sm md:text-base">{p.name}</span>
                         </label>
-                        <label className="flex items-center gap-2">
-                          <span className="text-neutral-400">{I18N[lang].ddLabel}</span>
-                          <input type="checkbox" checked={p.canDouble} onChange={() => toggleDouble(p.id)} />
+                        <label className="flex items-center gap-2 cursor-pointer p-1">
+                          <span className="text-xs text-neutral-400">{I18N[lang].ddLabel}</span>
+                          <input type="checkbox" className="w-4 h-4 rounded accent-blue-600" checked={p.canDouble} onChange={() => toggleDouble(p.id)} />
                         </label>
                       </div>
                     );
@@ -736,14 +711,15 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="bg-neutral-800 rounded-xl p-3">
-                <div className="font-semibold mb-2">{I18N[lang].formSel}</div>
-                <div className="flex flex-wrap gap-2">
+              {/* Forms Column */}
+              <div className="bg-neutral-800 rounded-xl p-3 flex flex-col h-auto md:h-auto">
+                <div className="font-semibold mb-2 px-1">{I18N[lang].formSel}</div>
+                <div className="flex flex-wrap gap-2 content-start overflow-y-auto">
                   {allForms.map((f) => (
                     <button
                       key={f}
                       onClick={() => toggleForm(f)}
-                      className={`${allowedForms.has(f) ? "bg-emerald-600" : "bg-neutral-700"} ${isM ? "px-2 py-1 text-xs" : "px-3 py-1.5 text-sm"} rounded-full`}
+                      className={`${allowedForms.has(f) ? "bg-emerald-600 text-white shadow-lg" : "bg-neutral-700 text-neutral-300"} px-3 py-1.5 text-xs md:text-sm rounded-full transition-all`}
                     >
                       {f}
                     </button>
@@ -751,10 +727,11 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex items-end">
+              {/* Action Column */}
+              <div className="flex flex-col justify-end">
                 <button
                   onClick={doGenerate}
-                  className={`w-full bg-blue-600 hover:bg-blue-700 rounded-xl ${isM ? "py-2 text-sm" : "py-3 font-semibold"}`}
+                  className="w-full bg-blue-600 hover:bg-blue-700 active:scale-95 transition-transform rounded-xl py-4 font-bold text-lg shadow-lg shadow-blue-900/20"
                 >
                   {I18N[lang].next}
                 </button>
@@ -765,99 +742,98 @@ export default function App() {
       )}
 
       {step === 2 && (
-        <div className={`${wrapW} mx-auto ${shellPad}`}>
-          <div className={`bg-neutral-900 rounded-2xl ${cardPad} mb-3`}>
-            <div className="flex items-center justify-between">
-              <div className="font-semibold">{I18N[lang].codeBoxTitle}</div>
-              <button onClick={copyCode} className={`rounded bg-blue-600 hover:bg-blue-700 ${isM ? "px-2 py-1 text-sm" : "px-3 py-1.5"}`}>
+        <div className="max-w-6xl mx-auto p-2 md:p-4 pb-20">
+          <div className="bg-neutral-900 rounded-2xl p-4 mb-4 shadow-lg">
+            <div className="flex items-center justify-between mb-2">
+              <div className="font-semibold text-sm md:text-base">{I18N[lang].codeBoxTitle}</div>
+              <button onClick={copyCode} className="rounded bg-blue-600 hover:bg-blue-700 px-3 py-1.5 text-xs font-bold uppercase tracking-wide">
                 {I18N[lang].copy}
               </button>
             </div>
             <textarea
-              className={`w-full ${isM ? "h-24" : "h-28"} mt-2 rounded bg-neutral-800 border border-neutral-700 p-2 font-mono ${isM ? "text-[11px]" : "text-xs"}`}
+              className="w-full h-20 rounded bg-neutral-800 border border-neutral-700 p-2 font-mono text-xs text-neutral-300 focus:outline-none"
               readOnly
               value={generatedCode}
               onFocus={(e) => e.currentTarget.select()}
             />
           </div>
 
-          <div ref={boardRef} className={`bg-white text-black rounded-2xl ${cardPad} ${tableText}`}>
-            <div className={`flex items-start justify-between ${isM ? "gap-2" : ""}`}>
-              <div className={`${isM ? "text-base" : "text-xl"} font-bold`}>{title}</div>
+          <div ref={boardRef} className="bg-white text-black rounded-2xl p-4 md:p-8 shadow-2xl">
+            <div className="flex items-start justify-between border-b-2 border-black pb-4 mb-4">
+              <div className="text-xl md:text-3xl font-bold tracking-tight">{title}</div>
               <div className="text-right">
-                <div className={`${isM ? "text-[11px]" : "text-sm"}`}>{I18N[lang].date}</div>
-                <div className={`${isM ? "text-sm" : "font-semibold"}`}>{dateStr}</div>
+                <div className="text-xs text-gray-500 uppercase tracking-widest">{I18N[lang].date}</div>
+                <div className="text-lg font-bold">{dateStr}</div>
               </div>
             </div>
 
-            <div className="mt-3 overflow-x-auto">
-              <table className="w-full table-fixed border border-gray-300">
-                <thead className="bg-gray-100 sticky top-0 z-10">
-                  <tr>
-                    <th className={`${thPad} border whitespace-nowrap`}>{I18N[lang].colFormRoom}</th>
-                    <th className={`${thPad} border`}>{I18N[lang].colNameDept}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rooms
-                    .filter((r) => filteredRooms.find((fr) => fr.id === r.id)?.enabled)
-                    .sort((a, b) => {
-                      const ga = gradeOf(a.form), gb = gradeOf(b.form);
-                      if (ga !== gb) return ga - gb;
-                      if (a.building !== b.building) return a.building.localeCompare(b.building);
-                      if (a.floor !== b.floor) return a.floor - b.floor;
-                      return a.number - b.number;
-                    })
-                    .map((r) => {
-                      const a = assignments.find((x) => x.rooms.includes(r.id));
-                      const formRoom = r.form ? `${r.form} ${r.id}` : r.id;
+            {/* Responsive Table / Grid */}
+            <div className="w-full">
+              {/* Desktop Header */}
+              <div className="hidden md:grid grid-cols-2 bg-gray-100 font-bold text-sm uppercase tracking-wide border-b border-gray-300">
+                <div className="p-3 border-r border-gray-300">{I18N[lang].colFormRoom}</div>
+                <div className="p-3">{I18N[lang].colNameDept}</div>
+              </div>
 
-                      const personName = a?.person ?? "";
-                      const rawDept = personName ? (people.find((p) => p.name === personName)?.dept ?? "") : "";
-                      const dept = normalizeDept(rawDept);
-                      const st = deptStyleOf(rawDept);
+              {/* List */}
+              <div className="grid grid-cols-1 md:grid-cols-1 divide-y md:divide-y-0 md:border-l md:border-r md:border-b border-gray-300">
+                {rooms
+                  .filter((r) => filteredRooms.find((fr) => fr.id === r.id)?.enabled)
+                  .sort((a, b) => {
+                    const ga = gradeOf(a.form), gb = gradeOf(b.form);
+                    if (ga !== gb) return ga - gb;
+                    if (a.building !== b.building) return a.building.localeCompare(b.building);
+                    if (a.floor !== b.floor) return a.floor - b.floor;
+                    return a.number - b.number;
+                  })
+                  .map((r) => {
+                    const a = assignments.find((x) => x.rooms.includes(r.id));
+                    const formRoom = r.form ? `${r.form} ${r.id}` : r.id;
 
-                      // ✅ 右侧整格上色：没有人就不染色
-                      const cellStyle: React.CSSProperties = personName
-                        ? {
-                            background: st.bg,
-                            color: st.fg,
-                          }
-                        : {};
+                    const personName = a?.person ?? "";
+                    const rawDept = personName ? (people.find((p) => p.name === personName)?.dept ?? "") : "";
+                    const dept = normalizeDept(rawDept);
+                    const st = deptStyleOf(rawDept);
 
-                      // 让格子边框仍清晰
-                      const innerBorder = st.border || "rgba(0,0,0,0.12)";
+                    const cellStyle: React.CSSProperties = personName
+                      ? { background: st.bg, color: st.fg }
+                      : {};
+                    const innerBorder = st.border || "rgba(0,0,0,0.1)";
 
-                      return (
-                        <tr key={r.id} className={`${isM ? "align-top" : ""}`}>
-                          <td className={`${tdPad} border whitespace-nowrap`}>{formRoom}</td>
-                          <td
-                            className={`${tdPad} border break-words`}
-                            style={{
-                              ...cellStyle,
-                              borderColor: personName ? innerBorder : undefined,
-                            }}
-                          >
-                            <span style={{ fontWeight: 700 }}>{personName}</span>
-                            {dept ? <span style={{ opacity: 0.92, marginLeft: 8, fontWeight: 600 }}>{dept}</span> : null}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                </tbody>
-              </table>
+                    return (
+                      <div key={r.id} className="md:grid md:grid-cols-2 group">
+                        {/* Mobile Card Style */}
+                        <div className="md:hidden p-3 border rounded-lg mb-2 shadow-sm break-inside-avoid" style={{ ...cellStyle, border: `1px solid ${personName ? innerBorder : '#e5e7eb'}` }}>
+                          <div className="flex justify-between items-center mb-1">
+                             <span className="font-bold text-lg">{formRoom}</span>
+                             {dept && <span className="text-xs font-bold uppercase opacity-80 border border-current px-1 rounded">{dept}</span>}
+                          </div>
+                          <div className="text-xl font-bold">{personName || <span className="text-gray-300">-</span>}</div>
+                        </div>
+
+                        {/* Desktop Table Row Style */}
+                        <div className="hidden md:block p-3 border-r border-gray-200 font-mono text-lg">{formRoom}</div>
+                        <div className="hidden md:flex items-center p-3 font-bold text-lg" style={cellStyle}>
+                          <span>{personName}</span>
+                          {dept && <span className="ml-3 text-xs opacity-75 border border-current px-1 rounded">{dept}</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+            
+            <div className="mt-8 text-center text-gray-400 text-xs font-mono">
+              Generated via Gubei Prefect Toolkit
             </div>
           </div>
 
-          <div className={`mt-3 flex ${isM ? "flex-col" : "flex-row"} gap-3`}>
-            <button onClick={() => setStep(1)} className={`rounded bg-neutral-700 hover:bg-neutral-600 ${isM ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
+          <div className="mt-6 flex flex-col md:flex-row gap-4">
+            <button onClick={() => setStep(1)} className="rounded-xl bg-neutral-700 hover:bg-neutral-600 py-3 px-6 font-bold w-full md:w-auto">
               {I18N[lang].back}
             </button>
-            <button onClick={exportJPG} className={`rounded bg-emerald-600 hover:bg-emerald-700 ${isM ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
+            <button onClick={shareOrCopyJPG} className="rounded-xl bg-emerald-600 hover:bg-emerald-700 py-3 px-6 font-bold w-full shadow-lg shadow-emerald-900/20">
               {I18N[lang].exportJPG}
-            </button>
-            <button onClick={copyJPGToClipboard} className={`rounded bg-amber-600 hover:bg-amber-700 ${isM ? "w-full py-2 text-sm" : "px-3 py-2"}`}>
-              {I18N[lang].copyJPG}
             </button>
           </div>
         </div>
