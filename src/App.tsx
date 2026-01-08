@@ -46,10 +46,11 @@ const I18N: Record<Lang, any> = {
     formSel: "班级（Form）选择",
     next: "下一步",
     back: "返回",
-    exportJPG: "保存/分享 JPG",
-    copyJPG: "复制 JPG",
-    copyJPGOk: "JPG 已复制",
-    copyJPGFail: "当前浏览器不支持复制 JPG，请使用保存按钮",
+    exportShare: "分享 (手机/AirDrop)",
+    download: "下载图片",
+    copyJPG: "复制图片",
+    copyJPGOk: "图片已复制到剪贴板",
+    shareFail: "当前设备不支持直接分享，已自动为您复制图片",
     codeBoxTitle: "排布码（已生成，粘贴到下一轮以避免重复）",
     copy: "复制",
     copyOk: "排布码已复制",
@@ -75,10 +76,11 @@ const I18N: Record<Lang, any> = {
     formSel: "Forms",
     next: "Next",
     back: "Back",
-    exportJPG: "Save/Share JPG",
-    copyJPG: "Copy JPG",
-    copyJPGOk: "JPG copied",
-    copyJPGFail: "Clipboard image not supported, please use Save button",
+    exportShare: "Share (Mobile/AirDrop)",
+    download: "Download JPG",
+    copyJPG: "Copy Image",
+    copyJPGOk: "Image copied to clipboard",
+    shareFail: "Sharing not supported on this device, image copied instead.",
     codeBoxTitle: "Rota Code (paste next time to avoid repeats)",
     copy: "Copy",
     copyOk: "Rota code copied",
@@ -545,14 +547,16 @@ export default function App() {
     });
   }
 
-  // Use Web Share API if available, else copy to clipboard, else download
-  async function shareOrCopyJPG() {
+  // 1. Try Native Share (Mobile)
+  // 2. Fallback to Copy Image (Desktop Safari sometimes allows this)
+  // 3. Fallback to Download (Universal)
+  async function shareImage() {
     if (!boardRef.current) return;
     try {
       const { toJpeg } = await import("html-to-image");
       const dataUrl = await toJpeg(boardRef.current, {
         quality: 0.95,
-        pixelRatio: 3, // High quality for everyone
+        pixelRatio: 3,
         backgroundColor: "#ffffff",
       });
       
@@ -560,7 +564,7 @@ export default function App() {
       const blob = await res.blob();
       const file = new File([blob], `${title.replace(/\s+/g, "_")}_${dateStr}.jpg`, { type: "image/jpeg" });
 
-      // Native Share (Mobile)
+      // Try Native Share
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({
           files: [file],
@@ -570,30 +574,36 @@ export default function App() {
         return;
       }
 
-      // Clipboard Fallback
+      // If we are here, browser refused share (common on Mac/Desktop).
+      // Auto-fallback to Copy
       const canWrite =
         typeof navigator.clipboard?.write === "function" &&
         typeof ClipboardItem !== "undefined";
         
       if (canWrite) {
         await navigator.clipboard.write([new ClipboardItem({ "image/jpeg": blob })]);
-        showToast(L.copyJPGOk);
+        showToast(L.shareFail); // Tell user we copied instead
         return;
       }
 
-      // Download Fallback
-      throw new Error("No share or clipboard support");
+      throw new Error("No share/copy support");
     } catch (e) {
       console.warn(e);
-      // Fallback to simple download
-      if (boardRef.current) {
-        const { toJpeg } = await import("html-to-image");
-        const url = await toJpeg(boardRef.current, { quality: 0.95, pixelRatio: 3, backgroundColor: "#fff" });
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `${title.replace(/\s+/g, "_")}_${dateStr}.jpg`;
-        link.click();
-      }
+      showToast(L.copyFail);
+    }
+  }
+
+  async function downloadImage() {
+    if (!boardRef.current) return;
+    try {
+      const { toJpeg } = await import("html-to-image");
+      const url = await toJpeg(boardRef.current, { quality: 0.95, pixelRatio: 3, backgroundColor: "#fff" });
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${title.replace(/\s+/g, "_")}_${dateStr}.jpg`;
+      link.click();
+    } catch (e) {
+      console.error(e);
     }
   }
 
@@ -738,7 +748,7 @@ export default function App() {
       )}
 
       {step === 2 && (
-        <div className="max-w-6xl mx-auto p-2 md:p-4 pb-20">
+        <div className="max-w-3xl mx-auto p-2 md:p-4 pb-20">
           <div className="bg-neutral-900 rounded-2xl p-4 mb-4 shadow-lg">
             <div className="flex items-center justify-between mb-2">
               <div className="font-semibold text-sm md:text-base">{I18N[lang].codeBoxTitle}</div>
@@ -764,15 +774,15 @@ export default function App() {
             </div>
 
             {/* Responsive Table / Grid */}
-            <div className="w-full">
+            <div className="w-full border border-gray-200">
               {/* Desktop Header */}
-              <div className="hidden md:grid grid-cols-2 bg-gray-100 font-bold text-sm uppercase tracking-wide border-b border-gray-300">
-                <div className="p-3 border-r border-gray-300">{I18N[lang].colFormRoom}</div>
+              <div className="hidden md:grid grid-cols-2 bg-gray-800 text-white font-bold text-sm uppercase tracking-wide">
+                <div className="p-3 border-r border-gray-600">{I18N[lang].colFormRoom}</div>
                 <div className="p-3">{I18N[lang].colNameDept}</div>
               </div>
 
-              {/* List */}
-              <div className="grid grid-cols-1 md:grid-cols-1 divide-y md:divide-y-0 md:border-l md:border-r md:border-b border-gray-300">
+              {/* List with Zebra Striping (even:bg-gray-50) */}
+              <div className="grid grid-cols-1 md:grid-cols-1 divide-y divide-gray-200">
                 {rooms
                   .filter((r) => filteredRooms.find((fr) => fr.id === r.id)?.enabled)
                   .sort((a, b) => {
@@ -797,7 +807,7 @@ export default function App() {
                     const innerBorder = st.border || "rgba(0,0,0,0.1)";
 
                     return (
-                      <div key={r.id} className="md:grid md:grid-cols-2 group">
+                      <div key={r.id} className="md:grid md:grid-cols-2 group even:bg-gray-50 hover:bg-gray-100 transition-colors">
                         {/* Mobile Card Style */}
                         <div className="md:hidden p-3 border rounded-lg mb-2 shadow-sm break-inside-avoid" style={{ ...cellStyle, border: `1px solid ${personName ? innerBorder : '#e5e7eb'}` }}>
                           <div className="flex justify-between items-center mb-1">
@@ -808,7 +818,7 @@ export default function App() {
                         </div>
 
                         {/* Desktop Table Row Style */}
-                        <div className="hidden md:block p-3 border-r border-gray-200 font-mono text-lg">{formRoom}</div>
+                        <div className="hidden md:block p-3 border-r border-gray-200 font-mono text-lg font-bold text-gray-700">{formRoom}</div>
                         <div className="hidden md:flex items-center p-3 font-bold text-lg" style={cellStyle}>
                           <span>{personName}</span>
                           {dept && <span className="ml-3 text-xs opacity-75 border border-current px-1 rounded">{dept}</span>}
@@ -824,13 +834,18 @@ export default function App() {
             </div>
           </div>
 
-          <div className="mt-6 flex flex-col md:flex-row gap-4">
-            <button onClick={() => setStep(1)} className="rounded-xl bg-neutral-700 hover:bg-neutral-600 py-3 px-6 font-bold w-full md:w-auto">
-              {I18N[lang].back}
-            </button>
-            <button onClick={shareOrCopyJPG} className="rounded-xl bg-emerald-600 hover:bg-emerald-700 py-3 px-6 font-bold w-full shadow-lg shadow-emerald-900/20">
-              {I18N[lang].exportJPG}
-            </button>
+          <div className="mt-6 flex flex-col gap-3">
+             <div className="flex gap-3">
+              <button onClick={() => setStep(1)} className="rounded-xl bg-neutral-700 hover:bg-neutral-600 py-3 px-6 font-bold flex-1">
+                {I18N[lang].back}
+              </button>
+              <button onClick={downloadImage} className="rounded-xl bg-amber-600 hover:bg-amber-700 py-3 px-6 font-bold flex-1 shadow-lg">
+                 {I18N[lang].download}
+              </button>
+             </div>
+             <button onClick={shareImage} className="rounded-xl bg-emerald-600 hover:bg-emerald-700 py-3 px-6 font-bold w-full shadow-lg shadow-emerald-900/20">
+               {I18N[lang].exportShare}
+             </button>
           </div>
         </div>
       )}
