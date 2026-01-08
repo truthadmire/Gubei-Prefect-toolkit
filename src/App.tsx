@@ -284,23 +284,17 @@ function makeCost(
   strong: boolean,
   randJitter: (() => number) | null
 ): number {
-  // If slot needs 2 rooms but person can't double, impossible cost
   if (slot.rooms.length === 2 && !p.canDouble) return 1e9;
 
-  // History penalty
   const last = new Set(p.lastRooms || []);
   if (strong) {
-    // Strong penalty if any room was used last time
     for (const r of slot.rooms) if (last.has(r)) return 1e6;
-    // Strong penalty if exact pair repeated
     if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) return 1e6;
   }
 
   let c = 0;
-  // Soft penalty
   for (const r of slot.rooms) if (last.has(r)) c += 100;
   if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) c += 200;
-  
   c += p.assignedCount * 5;
 
   if (randJitter) c += Math.floor(randJitter() * 2);
@@ -401,7 +395,6 @@ function generateAssignment(
 
   const base = hungarianAssign(people, slots, randJitter);
 
-  // Fill remaining gaps if any
   const assignedRooms = new Set(base.flatMap((a) => a.rooms));
   const still = enabledRooms.filter((r) => !assignedRooms.has(r.id));
   if (still.length) {
@@ -659,6 +652,7 @@ export default function App() {
       {step === 1 && (
         <div className="max-w-6xl mx-auto p-2 md:p-4">
           <div className="bg-neutral-900 rounded-2xl p-4 md:p-6 shadow-xl">
+            {/* Input Row */}
             <div className="flex flex-col gap-3 md:flex-row md:items-center">
               <input
                 className="flex-1 rounded-lg px-4 py-3 bg-neutral-800 border border-neutral-700 text-sm md:text-base focus:ring-2 focus:ring-blue-500 outline-none"
@@ -682,13 +676,13 @@ export default function App() {
 
             <div className="mt-3 text-xs md:text-sm text-neutral-400 px-1">{statusText}</div>
 
-            {/* Layout: Mobile = Stacked, Desktop = 3 Columns */}
+            {/* Layout: Fixed height on desktop to enable internal scrolling */}
             <div className="mt-4 flex flex-col md:grid md:grid-cols-3 gap-4 h-auto md:h-[600px]">
               
               {/* People Column */}
-              <div className="bg-neutral-800 rounded-xl p-3 flex flex-col h-[40vh] md:h-auto">
-                <div className="font-semibold mb-2 px-1">{I18N[lang].peopleSel}</div>
-                <div className="flex-1 overflow-y-auto min-h-0 divide-y divide-neutral-700 pr-1">
+              <div className="bg-neutral-800 rounded-xl p-3 flex flex-col h-[40vh] md:h-full min-h-0">
+                <div className="font-semibold mb-2 px-1 shrink-0">{I18N[lang].peopleSel}</div>
+                <div className="flex-1 overflow-y-auto min-h-0 divide-y divide-neutral-700 pr-1 custom-scrollbar">
                   {people.slice().sort((a, b) => a.name.localeCompare(b.name)).map((p) => {
                     const st = deptStyleOf(p.dept);
                     return (
@@ -712,23 +706,25 @@ export default function App() {
               </div>
 
               {/* Forms Column */}
-              <div className="bg-neutral-800 rounded-xl p-3 flex flex-col h-auto md:h-auto">
-                <div className="font-semibold mb-2 px-1">{I18N[lang].formSel}</div>
-                <div className="flex flex-wrap gap-2 content-start overflow-y-auto">
-                  {allForms.map((f) => (
-                    <button
-                      key={f}
-                      onClick={() => toggleForm(f)}
-                      className={`${allowedForms.has(f) ? "bg-emerald-600 text-white shadow-lg" : "bg-neutral-700 text-neutral-300"} px-3 py-1.5 text-xs md:text-sm rounded-full transition-all`}
-                    >
-                      {f}
-                    </button>
-                  ))}
+              <div className="bg-neutral-800 rounded-xl p-3 flex flex-col h-[30vh] md:h-full min-h-0">
+                <div className="font-semibold mb-2 px-1 shrink-0">{I18N[lang].formSel}</div>
+                <div className="flex-1 overflow-y-auto min-h-0 pr-1 custom-scrollbar">
+                  <div className="flex flex-wrap gap-2 content-start">
+                    {allForms.map((f) => (
+                      <button
+                        key={f}
+                        onClick={() => toggleForm(f)}
+                        className={`${allowedForms.has(f) ? "bg-emerald-600 text-white shadow-lg" : "bg-neutral-700 text-neutral-300"} px-3 py-1.5 text-xs md:text-sm rounded-full transition-all`}
+                      >
+                        {f}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
               {/* Action Column */}
-              <div className="flex flex-col justify-end">
+              <div className="flex flex-col justify-end h-auto md:h-full">
                 <button
                   onClick={doGenerate}
                   className="w-full bg-blue-600 hover:bg-blue-700 active:scale-95 transition-transform rounded-xl py-4 font-bold text-lg shadow-lg shadow-blue-900/20"
