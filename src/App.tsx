@@ -2,13 +2,16 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   applyImportedAssignments,
   generateAssignment,
-  isHepburnGrade12Blocked,
+  getGenerationSummary,
   makeRNG,
   packRotaCodeV2,
   parseRoomId,
   randomSeed,
+  swapAssignments,
   unpackRotaCodeCompat,
+  validateGeneration,
 } from "./lib/rota";
+import type { GenerationFailure, GenerationSummary, SwapResult } from "./lib/rota";
 import {
   GENERATION_HISTORY_KEY,
   formatHistoryLabel,
@@ -16,6 +19,14 @@ import {
   readGenerationHistoryFrom,
   writeGenerationHistory,
 } from "./lib/history";
+import {
+  buildBoardExportKey,
+  buildExcelBlob,
+  dataUrlToBlob,
+  downloadBlob,
+  loadImageExporter,
+  safeFilePart,
+} from "./lib/export";
 import type {
   Assignment,
   DeptStyle,
@@ -43,6 +54,9 @@ const I18N: Record<Lang, any> = {
     titleRequired: "请输入公告标题",
     datePh: "输入公告日期 / Enter date of announcement",
     dateRequired: "请输入公告日期",
+    emptyPeople: "请至少选择一位 Prefect。",
+    emptyRooms: "请至少选择一个班级。",
+    generationInfeasible: "当前选择无法满足房间覆盖规则，请调整人员或班级。",
     confirmTitle: "确认继续？",
     confirmBody: "有人员或班级未被选中，本次排布将跳过以下项目。",
     confirmPeople: "未选 Prefect",
@@ -62,7 +76,9 @@ const I18N: Record<Lang, any> = {
     downloadExcel: "下载 Excel",
     copyJPG: "复制图片",
     copyJPGOk: "图片已复制到剪贴板",
+    jpgFail: "图片生成失败，请重试。",
     excelOk: "Excel 表格已下载",
+    excelFail: "Excel 表格生成失败，请重试。",
     shareFail: "当前设备不支持直接分享，已自动为您复制图片",
     codeBoxTitle: "排布码（已生成，粘贴到下一轮以避免重复）",
     copy: "复制",
@@ -83,7 +99,10 @@ const I18N: Record<Lang, any> = {
     doubleDutyBadge: "双班",
     dragHint: "拖动人员到另一行交换位置；手机可点选两行交换。",
     dragDoubleBlocked: (name: string) => `${name} 未开启双班，不能移动到双班位置。`,
+    dragDoubleBlockedGeneric: "此交换会将未开启双班的人员移到双班位置。",
     dragHepburnBlocked: "Hepburn He 不能被安排到 12 年级班级。",
+    dragMissing: "无法找到要交换的排布位置。",
+    dragSameSlot: "请选择另一行进行交换。",
     dragUpdated: "排布已更新",
     languageLabel: "语言/Language",
     languageZh: "中文",
@@ -103,6 +122,9 @@ const I18N: Record<Lang, any> = {
     titleRequired: "Please enter an announcement title.",
     datePh: "Enter date of announcement",
     dateRequired: "Please enter the announcement date.",
+    emptyPeople: "Select at least one Prefect.",
+    emptyRooms: "Select at least one form.",
+    generationInfeasible: "These selections cannot satisfy the room-coverage rules. Adjust the people or forms.",
     confirmTitle: "Continue?",
     confirmBody: "Some people or forms are not selected. This rota will skip the following items.",
     confirmPeople: "Deselected Prefects",
@@ -122,7 +144,9 @@ const I18N: Record<Lang, any> = {
     downloadExcel: "Download Excel",
     copyJPG: "Copy Image",
     copyJPGOk: "Image copied to clipboard",
+    jpgFail: "Could not generate the image. Please try again.",
     excelOk: "Excel table downloaded",
+    excelFail: "Could not generate the Excel table. Please try again.",
     shareFail: "Sharing not supported on this device, image copied instead.",
     codeBoxTitle: "Rota Code (paste next time to avoid repeats)",
     copy: "Copy",
@@ -143,7 +167,10 @@ const I18N: Record<Lang, any> = {
     doubleDutyBadge: "Double",
     dragHint: "Drag a person to another row to swap positions. On phone, tap two rows to swap.",
     dragDoubleBlocked: (name: string) => `${name} is not enabled for double duty and cannot move to a double-duty slot.`,
+    dragDoubleBlockedGeneric: "This swap would move someone without double-duty permission into a paired slot.",
     dragHepburnBlocked: "Hepburn He cannot be assigned to Grade 12 forms.",
+    dragMissing: "Could not find the rota positions to swap.",
+    dragSameSlot: "Choose a different row to swap.",
     dragUpdated: "Rota updated",
     languageLabel: "Language",
     languageZh: "Chinese",
@@ -226,116 +253,6 @@ function deptOrderOf(raw?: string): number {
  * Utils
  * ========================= */
 const uid = () => Math.random().toString(36).slice(2, 10);
-function xmlEscape(value: string | number | null | undefined) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-function safeFilePart(value: string) {
-  return (value.trim() || "rota").replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_");
-}
-function excelColor(color?: string) {
-  return /^#[0-9a-fA-F]{6}$/.test(color || "") ? color!.toUpperCase() : "#FFFFFF";
-}
-let imageExporterPromise: Promise<{ toJpeg: (node: HTMLElement, options: { quality: number; pixelRatio: number; backgroundColor: string }) => Promise<string> }> | null = null;
-function loadImageExporter() {
-  if (!imageExporterPromise) {
-    imageExporterPromise = import("html-to-image").then(({ toJpeg }) => ({ toJpeg }));
-  }
-  return imageExporterPromise;
-}
-function dataUrlToBlob(dataUrl: string) {
-  const [meta, payload] = dataUrl.split(",");
-  const mime = meta.match(/^data:([^;]+)/)?.[1] || "application/octet-stream";
-  const bin = atob(payload || "");
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Blob([bytes], { type: mime });
-}
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-function buildExcelBlob(
-  rows: ResultRow[],
-  options: { title: string; dateStr: string; dateLabel: string; roomHeader: string; nameHeader: string }
-) {
-  const styleMap = new Map<string, string>();
-  for (const row of rows) {
-    if (!row.personName) continue;
-    const key = `${excelColor(row.style.bg)}|${excelColor(row.style.fg)}`;
-    if (!styleMap.has(key)) styleMap.set(key, `person${styleMap.size}`);
-  }
-
-  const borderXml = `
-      <Borders>
-        <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#CBD5E1"/>
-        <Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#CBD5E1"/>
-        <Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#CBD5E1"/>
-        <Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#CBD5E1"/>
-      </Borders>`;
-  const personStyles = Array.from(styleMap.entries()).map(([key, id]) => {
-    const [bg, fg] = key.split("|");
-    return `
-        <Style ss:ID="${id}">
-          <Font ss:Bold="1" ss:Color="${fg}"/>
-          <Interior ss:Color="${bg}" ss:Pattern="Solid"/>
-          <Alignment ss:Vertical="Center"/>
-          ${borderXml}
-        </Style>`;
-  }).join("");
-
-  const rowsXml = rows.map((row) => {
-    const styleKey = `${excelColor(row.style.bg)}|${excelColor(row.style.fg)}`;
-    const personStyle = row.personName ? styleMap.get(styleKey) || "empty" : "empty";
-    return `
-        <Row ss:Height="28">
-          <Cell ss:StyleID="room"><Data ss:Type="String">${xmlEscape(row.formRoom)}</Data></Cell>
-          <Cell ss:StyleID="${personStyle}"><Data ss:Type="String">${xmlEscape(row.personName || "-")}</Data></Cell>
-        </Row>`;
-  }).join("");
-
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<?mso-application progid="Excel.Sheet"?>
-<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
-  xmlns:o="urn:schemas-microsoft-com:office:office"
-  xmlns:x="urn:schemas-microsoft-com:office:excel"
-  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
-  <Styles>
-    <Style ss:ID="title"><Font ss:Bold="1" ss:Size="16"/><Alignment ss:Vertical="Center"/></Style>
-    <Style ss:ID="meta"><Font ss:Bold="1" ss:Color="#475569"/></Style>
-    <Style ss:ID="header"><Font ss:Bold="1" ss:Color="#FFFFFF"/><Interior ss:Color="#0F172A" ss:Pattern="Solid"/><Alignment ss:Vertical="Center"/>${borderXml}</Style>
-    <Style ss:ID="room"><Font ss:Bold="1" ss:Color="#0F172A"/><Interior ss:Color="#E2E8F0" ss:Pattern="Solid"/><Alignment ss:Vertical="Center"/>${borderXml}</Style>
-    <Style ss:ID="empty"><Font ss:Bold="1" ss:Color="#94A3B8"/><Interior ss:Color="#F8FAFC" ss:Pattern="Solid"/><Alignment ss:Vertical="Center"/>${borderXml}</Style>
-    ${personStyles}
-  </Styles>
-  <Worksheet ss:Name="Rota">
-    <Table>
-      <Column ss:Width="140"/>
-      <Column ss:Width="220"/>
-      <Row ss:Height="26"><Cell ss:StyleID="title" ss:MergeAcross="1"><Data ss:Type="String">${xmlEscape(options.title)}</Data></Cell></Row>
-      <Row><Cell ss:StyleID="meta"><Data ss:Type="String">${xmlEscape(options.dateLabel)}</Data></Cell><Cell><Data ss:Type="String">${xmlEscape(options.dateStr)}</Data></Cell></Row>
-      <Row/>
-      <Row ss:Height="24">
-        <Cell ss:StyleID="header"><Data ss:Type="String">${xmlEscape(options.roomHeader)}</Data></Cell>
-        <Cell ss:StyleID="header"><Data ss:Type="String">${xmlEscape(options.nameHeader)}</Data></Cell>
-      </Row>
-      ${rowsXml}
-    </Table>
-  </Worksheet>
-</Workbook>`;
-
-  return new Blob([xml], { type: "application/vnd.ms-excel;charset=utf-8" });
-}
 
 /** ---- roster.json ---- */
 async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
@@ -509,14 +426,19 @@ export default function App() {
     return rooms.map((r) => ({ ...r, enabled: r.form ? allowedForms.has(r.form) : true }));
   }, [rooms, allowedForms]);
 
+  const generationSummary = useMemo(
+    () => getGenerationSummary(people, filteredRooms),
+    [people, filteredRooms],
+  );
+
   const statusText = useMemo(() => {
-    const active = people.filter((p) => p.active);
-    const activeCount = active.length;
-    const roomCount = filteredRooms.filter((r) => r.enabled).length;
-    const needPairs = Math.max(0, roomCount - activeCount);
-    const canDouble = active.filter((p) => p.canDouble).length;
-    return L.status(activeCount, roomCount, needPairs, canDouble);
-  }, [people, filteredRooms, lang]);
+    return L.status(
+      generationSummary.activePeople,
+      generationSummary.enabledRooms,
+      generationSummary.requiredDouble,
+      generationSummary.availableDouble,
+    );
+  }, [generationSummary, L]);
 
   function toggleForm(form: string) {
     setAllowedForms((prev) => {
@@ -543,17 +465,34 @@ export default function App() {
     setPeople((prev) => prev.map((p) => (p.id === id ? { ...p, canDouble: !p.canDouble } : p)));
   }
 
+  function generationFailureMessage(reason: GenerationFailure, summary: GenerationSummary): string {
+    switch (reason) {
+      case "title": return L.titleRequired;
+      case "date": return L.dateRequired;
+      case "empty-people": return L.emptyPeople;
+      case "empty-rooms": return L.emptyRooms;
+      case "capacity": return L.ddTooFew(summary.requiredDouble, summary.availableDouble);
+      case "infeasible": return L.generationInfeasible;
+    }
+  }
+
+  function swapFailureMessage(reason: Extract<SwapResult, { ok: false }>["reason"]): string {
+    switch (reason) {
+      case "missing": return L.dragMissing;
+      case "same-slot": return L.dragSameSlot;
+      case "double-duty": return L.dragDoubleBlockedGeneric;
+      case "grade-12": return L.dragHepburnBlocked;
+    }
+  }
+
   function doGenerate(skipSelectionConfirm = false) {
-    const cleanTitle = title.trim();
-    const cleanDate = dateStr.trim();
-    if (!cleanTitle) {
-      showToast(L.titleRequired);
+    const validation = validateGeneration(title, dateStr, people, filteredRooms);
+    if (!validation.ok) {
+      showToast(generationFailureMessage(validation.reason, validation.summary));
       return;
     }
-    if (!cleanDate) {
-      showToast(L.dateRequired);
-      return;
-    }
+    const cleanTitle = validation.title;
+    const cleanDate = validation.date;
     if (cleanTitle !== title) setTitle(cleanTitle);
     if (cleanDate !== dateStr) setDateStr(cleanDate);
 
@@ -568,16 +507,6 @@ export default function App() {
     const rng = makeRNG(seed);
     const randJitter = hasHistory ? null : rng;
 
-    const active = people.filter((p) => p.active);
-    const canDouble = active.filter((p) => p.canDouble).length;
-    const R = filteredRooms.filter((r) => r.enabled).length;
-    const P = active.length;
-    const need = Math.max(0, R - P);
-    if (need > canDouble) {
-      showToast(L.ddTooFew(need, canDouble));
-      return;
-    }
-
     const A = generateAssignment(people, filteredRooms, randJitter, !hasHistory);
     setAssignments(A);
     setStep(2);
@@ -585,61 +514,39 @@ export default function App() {
     const payload = { date: cleanDate, assignments: A };
     packRotaCodeV2(payload).then((code) => {
       setGeneratedCode(code);
-      navigator.clipboard.writeText(code).then(
+      const clipboard = navigator.clipboard;
+      if (!clipboard?.writeText) {
+        showToast(L.codeBoxTitle);
+        return;
+      }
+      clipboard.writeText(code).then(
         () => showToast(L.copyOk),
-        () => showToast(L.codeBoxTitle)
+        () => showToast(L.codeBoxTitle),
       );
     });
   }
 
   async function copyCode() {
     try {
-      await navigator.clipboard.writeText(generatedCode);
+      const clipboard = navigator.clipboard;
+      if (!clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await clipboard.writeText(generatedCode);
       showToast(L.copyOk);
     } catch {
       showToast(L.copyFail);
     }
   }
 
-  function canMovePersonToRooms(personName: string, roomIds: string[]) {
-    const person = personByName.get(personName);
-    if (!person) return false;
-    if (roomIds.length > 1 && !person.canDouble) {
-      showToast(L.dragDoubleBlocked(personName));
-      return false;
-    }
-    if (isHepburnGrade12Blocked(person, roomIds, roomById)) {
-      showToast(L.dragHepburnBlocked);
-      return false;
-    }
-    return true;
-  }
-
   function swapAssignmentsByRoom(sourceRoomId: string, targetRoomId: string) {
-    if (sourceRoomId === targetRoomId) return;
-
-    const sourceIndex = assignments.findIndex((assignment) => assignment.rooms.includes(sourceRoomId));
-    const targetIndex = assignments.findIndex((assignment) => assignment.rooms.includes(targetRoomId));
-    if (sourceIndex < 0 || targetIndex < 0) return;
-    if (sourceIndex === targetIndex) {
-      setSelectedSwapRoomId(null);
-      setDragRoomId(null);
-      return;
-    }
-
-    const source = assignments[sourceIndex];
-    const target = assignments[targetIndex];
-    if (!canMovePersonToRooms(source.person, target.rooms) || !canMovePersonToRooms(target.person, source.rooms)) {
-      return;
-    }
-
-    const next = assignments.map((assignment) => ({ ...assignment, rooms: assignment.rooms.slice() }));
-    next[sourceIndex] = { ...source, person: target.person };
-    next[targetIndex] = { ...target, person: source.person };
-    setAssignments(next);
-
+    const result = swapAssignments(assignments, sourceRoomId, targetRoomId, people, rooms);
     setSelectedSwapRoomId(null);
     setDragRoomId(null);
+    if (!result.ok) {
+      showToast(swapFailureMessage(result.reason));
+      return;
+    }
+
+    setAssignments(result.assignments);
     showToast(L.dragUpdated);
   }
 
@@ -647,10 +554,6 @@ export default function App() {
     if (!assignmentByRoom.has(roomId)) return;
     if (!selectedSwapRoomId) {
       setSelectedSwapRoomId(roomId);
-      return;
-    }
-    if (selectedSwapRoomId === roomId) {
-      setSelectedSwapRoomId(null);
       return;
     }
     swapAssignmentsByRoom(selectedSwapRoomId, roomId);
@@ -718,7 +621,6 @@ export default function App() {
   const deselectedPeople = useMemo(() => people.filter((p) => !p.active), [people]);
   const deselectedForms = useMemo(() => allFormNames.filter((form) => !allowedForms.has(form)), [allFormNames, allowedForms]);
 
-  const roomById = useMemo(() => new Map(rooms.map((room) => [room.id, room])), [rooms]);
   const personByName = useMemo(() => new Map(people.map((p) => [p.name, p])), [people]);
   const assignmentByRoom = useMemo(() => {
     const map = new Map<string, Assignment>();
@@ -747,24 +649,10 @@ export default function App() {
   const resultRows = useMemo(() => resultRowsByGrade.flatMap((group) => group.rows), [resultRowsByGrade]);
   const exportFileBase = useMemo(() => `${safeFilePart(title)}_${safeFilePart(dateStr)}`, [title, dateStr]);
   const nameHeader = useMemo(() => I18N[lang].colNameDept.split(" + ")[0] || "Name", [lang]);
-  const excelExportBlob = useMemo(
-    () => buildExcelBlob(resultRows, {
-      title,
-      dateStr,
-      dateLabel: L.date,
-      roomHeader: I18N[lang].colFormRoom,
-      nameHeader,
-    }),
-    [L.date, dateStr, lang, nameHeader, resultRows, title]
+  const boardExportKey = useMemo(
+    () => buildBoardExportKey(lang, title, dateStr, resultRows),
+    [dateStr, lang, resultRows, title],
   );
-  const boardExportKey = useMemo(() => {
-    return [
-      lang,
-      title,
-      dateStr,
-      ...resultRows.map((row) => `${row.formRoom}\t${row.personName}\t${row.style.bg}\t${row.style.fg}\t${row.style.border || ""}`),
-    ].join("\n");
-  }, [dateStr, lang, resultRows, title]);
 
   async function getJpegExport() {
     const node = boardRef.current;
@@ -821,7 +709,7 @@ export default function App() {
       downloadBlob(image.blob, `${exportFileBase}.jpg`);
     } catch (e) {
       console.error(e);
-      showToast(L.copyFail);
+      showToast(L.jpgFail);
     }
   }
 
@@ -852,13 +740,25 @@ export default function App() {
       throw new Error("No share/copy support");
     } catch (e) {
       console.warn(e);
-      showToast(L.copyFail);
+      showToast(L.jpgFail);
     }
   }
 
   function downloadExcel() {
-    downloadBlob(excelExportBlob, `${exportFileBase}.xls`);
-    showToast(L.excelOk);
+    try {
+      const excelExportBlob = buildExcelBlob(resultRows, {
+        title,
+        dateStr,
+        dateLabel: L.date,
+        roomHeader: I18N[lang].colFormRoom,
+        nameHeader,
+      });
+      downloadBlob(excelExportBlob, `${exportFileBase}.xls`);
+      showToast(L.excelOk);
+    } catch (error) {
+      console.error(error);
+      showToast(L.excelFail);
+    }
   }
 
   const personGroups = useMemo<PersonGroup[]>(() => {
@@ -881,7 +781,12 @@ export default function App() {
       });
   }, [people, lang]);
 
-  const canContinue = title.trim().length > 0 && dateStr.trim().length > 0;
+  const canContinue = title.trim().length > 0 &&
+    dateStr.trim().length > 0 &&
+    generationSummary.activePeople > 0 &&
+    generationSummary.enabledRooms > 0 &&
+    generationSummary.hasCapacity &&
+    generationSummary.feasible;
 
   if (!loaded) {
     return <div className="min-h-screen flex items-center justify-center text-neutral-400">{L.loading}</div>;

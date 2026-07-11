@@ -3,11 +3,14 @@ import type { Assignment, Person, Room } from "../types";
 import {
   applyImportedAssignments,
   generateAssignment,
+  getGenerationSummary,
   packRotaCodeV2,
   pairKey,
   parseRoomId,
+  swapAssignments,
   unpackRotaCodeCompat,
   unpackRotaCodeV2,
+  validateGeneration,
 } from "./rota";
 
 function person(name: string, canDouble = true): Person {
@@ -133,6 +136,21 @@ describe("generateAssignment", () => {
     expect(hepburnAssignment?.rooms.some((id) => roomById.get(id)?.form?.startsWith("12"))).toBe(false);
   });
 
+  it("never gives a required Grade 12 pair to a person without double-duty permission", () => {
+    const people = [
+      { ...person("Single Only", false), assignedCount: 300_000_000 },
+      person("Hepburn He", true),
+    ];
+    const rooms = [room("N201", "12A"), room("N202", "12B"), room("N203", "9A")];
+
+    const assignments = generateAssignment(people, rooms, null, false);
+    const personByName = new Map(people.map((item) => [item.name, item]));
+
+    expect(assignments.every((assignment) =>
+      assignment.rooms.length === 1 || personByName.get(assignment.person)?.canDouble,
+    )).toBe(true);
+  });
+
   it("returns an empty assignment when there are no active people", () => {
     expect(generateAssignment([{ ...person("Inactive"), active: false }], [room("N201", "9A")], null, false)).toEqual([]);
   });
@@ -230,5 +248,181 @@ describe("applyImportedAssignments", () => {
 
     assignments[0].rooms.push("N299");
     expect(updated[0].lastRooms).toEqual(["N201", "N202"]);
+  });
+});
+
+describe("generation validation", () => {
+  it("summarizes only active people and enabled rooms", () => {
+    const summary = getGenerationSummary(
+      [person("A", true), person("B", false), { ...person("Inactive"), active: false }],
+      [room("N201", "9A"), room("N202", "9B"), room("N203", "9C"), { ...room("N204", "9D"), enabled: false }],
+    );
+
+    expect(summary).toEqual({
+      activePeople: 2,
+      enabledRooms: 3,
+      requiredDouble: 1,
+      availableDouble: 1,
+      hasCapacity: true,
+      feasible: true,
+    });
+  });
+
+  it("trims a valid title and date and exposes its staffing summary", () => {
+    const result = validateGeneration(
+      "  Morning rota  ",
+      "  2026-07-11  ",
+      [person("A", true)],
+      [room("N201", "9A"), room("N202", "9B")],
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      title: "Morning rota",
+      date: "2026-07-11",
+      summary: {
+        activePeople: 1,
+        enabledRooms: 2,
+        requiredDouble: 1,
+        availableDouble: 1,
+        hasCapacity: true,
+        feasible: true,
+      },
+    });
+  });
+
+  it("reports infeasible when the only double-duty person is blocked from every required Grade 12 pair", () => {
+    const result = validateGeneration(
+      "Morning rota",
+      "2026-07-11",
+      [
+        { ...person("Single Only", false), assignedCount: 300_000_000 },
+        person("Hepburn He", true),
+      ],
+      [room("N201", "12A"), room("N202", "12B"), room("N203", "9A")],
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "infeasible",
+      summary: {
+        requiredDouble: 1,
+        availableDouble: 1,
+        hasCapacity: true,
+        feasible: false,
+      },
+    });
+  });
+
+  it.each([
+    ["title", "   ", "2026-07-11", [person("A")], [room("N201", "9A")]],
+    ["date", "Morning", "   ", [person("A")], [room("N201", "9A")]],
+    ["empty-people", "Morning", "2026-07-11", [{ ...person("A"), active: false }], [room("N201", "9A")]],
+    ["empty-rooms", "Morning", "2026-07-11", [person("A")], [{ ...room("N201", "9A"), enabled: false }]],
+    ["capacity", "Morning", "2026-07-11", [person("A", false)], [room("N201", "9A"), room("N202", "9B")]],
+    ["infeasible", "Morning", "2026-07-11", [person("Hepburn He")], [room("N201", "12A")]],
+  ] as const)("returns the %s failure reason", (reason, title, date, people, rooms) => {
+    const result = validateGeneration(title, date, [...people], [...rooms]);
+
+    expect(result).toMatchObject({ ok: false, reason, title: title.trim(), date: date.trim() });
+    expect(result.summary).toEqual(expect.objectContaining({
+      requiredDouble: expect.any(Number),
+      availableDouble: expect.any(Number),
+    }));
+  });
+});
+
+describe("swapAssignments", () => {
+  it("swaps people without changing room slots or mutating inputs", () => {
+    const assignments: Assignment[] = [
+      { person: "A", rooms: ["N201"] },
+      { person: "B", rooms: ["N202", "N203"] },
+    ];
+    const people = [person("A", true), person("B", true)];
+    const rooms = [room("N201", "9A"), room("N202", "9B"), room("N203", "9C")];
+    const before = structuredClone(assignments);
+
+    const result = swapAssignments(assignments, "N201", "N202", people, rooms);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.assignments).toEqual([
+        { person: "B", rooms: ["N201"] },
+        { person: "A", rooms: ["N202", "N203"] },
+      ]);
+      expect(result.assignments).not.toBe(assignments);
+      expect(result.assignments[0].rooms).not.toBe(assignments[0].rooms);
+      expect(result.assignments[1].rooms).not.toBe(assignments[1].rooms);
+    }
+    expect(assignments).toEqual(before);
+    expect(assignments[0].person).toBe("A");
+  });
+
+  it("blocks a non-double person from a paired slot", () => {
+    const result = swapAssignments(
+      [
+        { person: "A", rooms: ["N201"] },
+        { person: "B", rooms: ["N202", "N203"] },
+      ],
+      "N201",
+      "N202",
+      [person("A", false), person("B", true)],
+      [room("N201", "9A"), room("N202", "9B"), room("N203", "9C")],
+    );
+
+    expect(result).toEqual({ ok: false, reason: "double-duty" });
+  });
+
+  it.each([
+    ["an unknown room", "N999", "N202", "missing"],
+    ["identical room IDs", "N201", "N201", "same-slot"],
+    ["two rooms in one paired slot", "N201", "N202", "same-slot"],
+  ] as const)("treats %s as a typed no-op", (_label, sourceRoomId, targetRoomId, reason) => {
+    const assignments: Assignment[] = [
+      { person: "A", rooms: ["N201", "N202"] },
+      { person: "B", rooms: ["N203"] },
+    ];
+    const before = structuredClone(assignments);
+
+    const result = swapAssignments(
+      assignments,
+      sourceRoomId,
+      targetRoomId,
+      [person("A"), person("B")],
+      [room("N201", "9A"), room("N202", "9B"), room("N203", "9C")],
+    );
+
+    expect(result).toEqual({ ok: false, reason });
+    expect(assignments).toEqual(before);
+  });
+
+  it("blocks Hepburn He from entering a Grade 12 slot", () => {
+    const result = swapAssignments(
+      [
+        { person: "Hepburn He", rooms: ["N201"] },
+        { person: "B", rooms: ["N202"] },
+      ],
+      "N201",
+      "N202",
+      [person("Hepburn He"), person("B")],
+      [room("N201", "9A"), room("N202", "12A")],
+    );
+
+    expect(result).toEqual({ ok: false, reason: "grade-12" });
+  });
+
+  it("returns missing when an assigned person is absent from the roster", () => {
+    const result = swapAssignments(
+      [
+        { person: "A", rooms: ["N201"] },
+        { person: "Unknown", rooms: ["N202"] },
+      ],
+      "N201",
+      "N202",
+      [person("A")],
+      [room("N201", "9A"), room("N202", "9B")],
+    );
+
+    expect(result).toEqual({ ok: false, reason: "missing" });
   });
 });

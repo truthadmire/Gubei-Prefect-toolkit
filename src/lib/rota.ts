@@ -6,6 +6,31 @@ type RotaPayload = {
   assignments: Assignment[];
 };
 
+export type SwapResult =
+  | { ok: true; assignments: Assignment[] }
+  | { ok: false; reason: "missing" | "same-slot" | "double-duty" | "grade-12" };
+
+export type GenerationFailure =
+  | "title"
+  | "date"
+  | "empty-people"
+  | "empty-rooms"
+  | "capacity"
+  | "infeasible";
+
+export type GenerationSummary = {
+  activePeople: number;
+  enabledRooms: number;
+  requiredDouble: number;
+  availableDouble: number;
+  hasCapacity: boolean;
+  feasible: boolean;
+};
+
+export type GenerationValidation =
+  | { ok: true; title: string; date: string; summary: GenerationSummary }
+  | { ok: false; reason: GenerationFailure; title: string; date: string; summary: GenerationSummary };
+
 export function parseRoomId(raw: string): { building: string; number: number; floor: number } | null {
   const match = raw.trim().match(/^([A-Za-z]+)(\d{3})$/);
   if (!match) return null;
@@ -136,8 +161,6 @@ function makeCost(
   strong: boolean,
   randJitter: (() => number) | null
 ): number {
-  if (slot.rooms.length === 2 && !p.canDouble) return 1e9;
-
   const last = new Set(p.lastRooms || []);
   if (strong) {
     for (const r of slot.rooms) if (last.has(r)) return 1e6;
@@ -203,6 +226,11 @@ export function isHepburnGrade12Blocked(p: Person, roomIds: string[], roomById: 
   return roomIds.some((roomId) => roomById.get(roomId)?.form?.startsWith("12"));
 }
 
+function isPersonEligibleForRooms(p: Person, roomIds: string[], roomById: Map<string, Room>): boolean {
+  return (roomIds.length < 2 || p.canDouble) &&
+    !isHepburnGrade12Blocked(p, roomIds, roomById);
+}
+
 function hungarianAssign(
   people: Person[],
   slots: Slot[],
@@ -214,9 +242,9 @@ function hungarianAssign(
   for (let i = 0; i < N; i++) {
     for (let j = 0; j < N; j++) {
       if (i < P && j < S) {
-        M[i][j] = isHepburnGrade12Blocked(people[i], slots[j].rooms, roomById)
-          ? 1e9
-          : makeCost(people[i], slots[j], true, randJitter);
+        M[i][j] = isPersonEligibleForRooms(people[i], slots[j].rooms, roomById)
+          ? makeCost(people[i], slots[j], true, randJitter)
+          : 1e9;
       }
       else if (i < P && j >= S) M[i][j] = 500 + (randJitter ? Math.floor(randJitter() * 2) : 0);
       else if (i >= P && j < S) M[i][j] = 1000 + (randJitter ? Math.floor(randJitter() * 2) : 0);
@@ -228,7 +256,7 @@ function hungarianAssign(
   const idxs: [number, number][] = mk.compute(M);
   const out: Assignment[] = [];
   for (const [ri, cj] of idxs) {
-    if (ri < P && cj < S && !isHepburnGrade12Blocked(people[ri], slots[cj].rooms, roomById)) {
+    if (ri < P && cj < S && isPersonEligibleForRooms(people[ri], slots[cj].rooms, roomById)) {
       out.push({ person: people[ri].name, rooms: slots[cj].rooms.slice() });
     }
   }
@@ -276,7 +304,7 @@ export function generateAssignment(
       for (let k = 0; k < pool.length; k++) {
         const cand = pool[(pi + k) % pool.length];
         const cur = usedBy.get(cand.name) || 0;
-        if (!isHepburnGrade12Blocked(cand, [r.id], roomById) && (cur === 0 || (cur >= 1 && cand.canDouble))) {
+        if (isPersonEligibleForRooms(cand, [r.id], roomById) && (cur === 0 || (cur >= 1 && cand.canDouble))) {
           chosen = cand;
           pi = (pi + k + 1) % pool.length;
           break;
@@ -289,6 +317,111 @@ export function generateAssignment(
     }
   }
   return base;
+}
+
+function assignmentsAreValid(assignments: Assignment[], people: Person[], enabledRooms: Room[]): boolean {
+  const expected = new Set(enabledRooms.map((room) => room.id));
+  const assigned = assignments.flatMap((assignment) => assignment.rooms);
+  const personByName = new Map(people.map((person) => [person.name, person]));
+  const roomById = new Map(enabledRooms.map((room) => [room.id, room]));
+  return assigned.length === expected.size &&
+    new Set(assigned).size === expected.size &&
+    assigned.every((roomId) => expected.has(roomId)) &&
+    assignments.every((assignment) => {
+      const person = personByName.get(assignment.person);
+      return !!person && isPersonEligibleForRooms(person, assignment.rooms, roomById);
+    });
+}
+
+export function getGenerationSummary(people: Person[], rooms: Room[]): GenerationSummary {
+  const activePeople = people.filter((person) => person.active);
+  const enabledRooms = rooms.filter((room) => room.enabled);
+  const requiredDouble = Math.max(0, enabledRooms.length - activePeople.length);
+  const availableDouble = activePeople.filter((person) => person.canDouble).length;
+  const hasCapacity = requiredDouble <= availableDouble;
+  const feasible = activePeople.length > 0 &&
+    enabledRooms.length > 0 &&
+    hasCapacity &&
+    assignmentsAreValid(
+      generateAssignment(activePeople, enabledRooms, null, false),
+      activePeople,
+      enabledRooms,
+    );
+
+  return {
+    activePeople: activePeople.length,
+    enabledRooms: enabledRooms.length,
+    requiredDouble,
+    availableDouble,
+    hasCapacity,
+    feasible,
+  };
+}
+
+export function validateGeneration(
+  title: string,
+  date: string,
+  people: Person[],
+  rooms: Room[],
+): GenerationValidation {
+  const cleanTitle = title.trim();
+  const cleanDate = date.trim();
+  const summary = getGenerationSummary(people, rooms);
+
+  let reason: GenerationFailure | null = null;
+  if (!cleanTitle) reason = "title";
+  else if (!cleanDate) reason = "date";
+  else if (summary.activePeople === 0) reason = "empty-people";
+  else if (summary.enabledRooms === 0) reason = "empty-rooms";
+  else if (!summary.hasCapacity) reason = "capacity";
+  else if (!summary.feasible) reason = "infeasible";
+
+  if (reason) return { ok: false, reason, title: cleanTitle, date: cleanDate, summary };
+  return { ok: true, title: cleanTitle, date: cleanDate, summary };
+}
+
+export function swapAssignments(
+  assignments: Assignment[],
+  sourceRoomId: string,
+  targetRoomId: string,
+  people: Person[],
+  rooms: Room[],
+): SwapResult {
+  if (sourceRoomId === targetRoomId) return { ok: false, reason: "same-slot" };
+
+  const sourceIndex = assignments.findIndex((assignment) => assignment.rooms.includes(sourceRoomId));
+  const targetIndex = assignments.findIndex((assignment) => assignment.rooms.includes(targetRoomId));
+  if (sourceIndex < 0 || targetIndex < 0) return { ok: false, reason: "missing" };
+  if (sourceIndex === targetIndex) return { ok: false, reason: "same-slot" };
+
+  const source = assignments[sourceIndex];
+  const target = assignments[targetIndex];
+  const personByName = new Map(people.map((person) => [person.name, person]));
+  const sourcePerson = personByName.get(source.person);
+  const targetPerson = personByName.get(target.person);
+  if (!sourcePerson || !targetPerson) return { ok: false, reason: "missing" };
+
+  const roomById = new Map(rooms.map((room) => [room.id, room]));
+  if ([...source.rooms, ...target.rooms].some((roomId) => !roomById.has(roomId))) {
+    return { ok: false, reason: "missing" };
+  }
+
+  if (!isPersonEligibleForRooms(sourcePerson, target.rooms, roomById) ||
+      !isPersonEligibleForRooms(targetPerson, source.rooms, roomById)) {
+    if ((target.rooms.length > 1 && !sourcePerson.canDouble) ||
+        (source.rooms.length > 1 && !targetPerson.canDouble)) {
+      return { ok: false, reason: "double-duty" };
+    }
+    return { ok: false, reason: "grade-12" };
+  }
+
+  const next = assignments.map((assignment) => ({
+    ...assignment,
+    rooms: assignment.rooms.slice(),
+  }));
+  next[sourceIndex] = { ...next[sourceIndex], person: target.person };
+  next[targetIndex] = { ...next[targetIndex], person: source.person };
+  return { ok: true, assignments: next };
 }
 
 export function applyImportedAssignments(people: Person[], assignments: Assignment[]): Person[] {
