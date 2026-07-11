@@ -3,23 +3,32 @@
   "version": "0.2.1",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
     "html-to-image": "^1.11.11",
-    "munkres-js": "1.2.2"
+    "munkres-js": "1.2.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^18.2.66",
+    "@types/react-dom": "^18.2.19",
+    "@vitejs/plugin-react": "^4.3.1",
+    "jsdom": "^29.1.1",
     "typescript": "^5.5.4",
     "vite": "^5.4.0",
-    "@vitejs/plugin-react": "^4.3.1",
-    "@types/react": "^18.2.66",
-    "@types/react-dom": "^18.2.19"
+    "vitest": "^3.2.4"
   }
 }
-
