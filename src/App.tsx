@@ -9,6 +9,13 @@ import {
   randomSeed,
   unpackRotaCodeCompat,
 } from "./lib/rota";
+import {
+  GENERATION_HISTORY_KEY,
+  formatHistoryLabel,
+  mergeGenerationHistory,
+  readGenerationHistoryFrom,
+  writeGenerationHistory,
+} from "./lib/history";
 import type {
   Assignment,
   DeptStyle,
@@ -151,9 +158,6 @@ const I18N: Record<Lang, any> = {
   },
 };
 
-const GENERATION_HISTORY_KEY = "gubei-prefect-toolkit.generation-history.v1";
-const GENERATION_HISTORY_LIMIT = 20;
-
 /** =========================
  * Dept color (from Key)
  * ========================= */
@@ -235,36 +239,6 @@ function safeFilePart(value: string) {
 }
 function excelColor(color?: string) {
   return /^#[0-9a-fA-F]{6}$/.test(color || "") ? color!.toUpperCase() : "#FFFFFF";
-}
-function isGenerationHistoryItem(value: unknown): value is GenerationHistoryItem {
-  const item = value as GenerationHistoryItem;
-  return !!item &&
-    typeof item.id === "string" &&
-    typeof item.savedAt === "string" &&
-    typeof item.title === "string" &&
-    typeof item.date === "string" &&
-    typeof item.code === "string" &&
-    Array.isArray(item.assignments);
-}
-function readGenerationHistory() {
-  try {
-    const raw = localStorage.getItem(GENERATION_HISTORY_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter(isGenerationHistoryItem).slice(0, GENERATION_HISTORY_LIMIT) : [];
-  } catch {
-    return [];
-  }
-}
-function writeGenerationHistory(items: GenerationHistoryItem[]) {
-  localStorage.setItem(GENERATION_HISTORY_KEY, JSON.stringify(items.slice(0, GENERATION_HISTORY_LIMIT)));
-}
-function formatHistoryLabel(item: GenerationHistoryItem) {
-  const savedAt = new Date(item.savedAt);
-  const savedLabel = Number.isNaN(savedAt.getTime())
-    ? item.savedAt
-    : savedAt.toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-  return `${item.date} · ${item.title} · ${savedLabel}`;
 }
 let imageExporterPromise: Promise<{ toJpeg: (node: HTMLElement, options: { quality: number; pixelRatio: number; backgroundColor: string }) => Promise<string> }> | null = null;
 function loadImageExporter() {
@@ -418,7 +392,8 @@ export default function App() {
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const boardRef = useRef<HTMLDivElement>(null);
   const imageExportCache = useRef<JpegExportCache | null>(null);
-  const [generationHistory, setGenerationHistory] = useState<GenerationHistoryItem[]>(readGenerationHistory);
+  const shouldPersistGenerationHistory = useRef(false);
+  const [generationHistory, setGenerationHistory] = useState<GenerationHistoryItem[]>([]);
   const [selectedHistoryId, setSelectedHistoryId] = useState("");
 
   const [generatedCode, setGeneratedCode] = useState("");
@@ -428,6 +403,20 @@ export default function App() {
     setToast({ id, text });
     setTimeout(() => setToast((t) => (t && t.id === id ? null : t)), ms);
   };
+
+  useEffect(() => {
+    setGenerationHistory(readGenerationHistoryFrom(() => window.localStorage));
+  }, []);
+
+  useEffect(() => {
+    if (!shouldPersistGenerationHistory.current) return;
+    shouldPersistGenerationHistory.current = false;
+    try {
+      writeGenerationHistory(window.localStorage, generationHistory);
+    } catch (error) {
+      console.warn("Could not save generation history", error);
+    }
+  }, [generationHistory]);
 
   useEffect(() => {
     loadRoster()
@@ -476,15 +465,8 @@ export default function App() {
       assignments: nextAssignments.map((assignment) => ({ person: assignment.person, rooms: assignment.rooms.slice() })),
     };
 
-    setGenerationHistory((prev) => {
-      const next = [item, ...prev.filter((existing) => existing.code !== code)].slice(0, GENERATION_HISTORY_LIMIT);
-      try {
-        writeGenerationHistory(next);
-      } catch (error) {
-        console.warn("Could not save generation history", error);
-      }
-      return next;
-    });
+    shouldPersistGenerationHistory.current = true;
+    setGenerationHistory((prev) => mergeGenerationHistory(prev, item));
   }
 
   function loadSelectedHistory() {
@@ -498,10 +480,11 @@ export default function App() {
   }
 
   function clearGenerationHistory() {
+    shouldPersistGenerationHistory.current = false;
     setGenerationHistory([]);
     setSelectedHistoryId("");
     try {
-      localStorage.removeItem(GENERATION_HISTORY_KEY);
+      window.localStorage.removeItem(GENERATION_HISTORY_KEY);
     } catch (error) {
       console.warn("Could not clear generation history", error);
     }
