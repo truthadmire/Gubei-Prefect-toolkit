@@ -3,6 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
+const toJpegMock = vi.hoisted(() => (
+  vi.fn<(node: HTMLElement) => Promise<string>>().mockResolvedValue("data:image/jpeg;base64,AAEC")
+));
+
+vi.mock("html-to-image", () => ({
+  toJpeg: toJpegMock,
+}));
+
 const roster = {
   people: [
     { name: "Alice Chen", dept: "Academia" },
@@ -35,17 +43,35 @@ async function completeBrief(user: ReturnType<typeof userEvent.setup>) {
   fireEvent.change(screen.getByLabelText("Announcement date"), { target: { value: "2026-07-11" } });
 }
 
+async function generateResult({ disableBobDouble = false } = {}) {
+  const user = await renderReady();
+  await completeBrief(user);
+  if (disableBobDouble) {
+    await user.click(screen.getByRole("checkbox", { name: "Bob Zhang Double-duty" }));
+  }
+  await user.click(screen.getByRole("button", { name: "Generate rota" }));
+  await screen.findByRole("region", { name: "Morning briefing" });
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Rota code copied"));
+  return user;
+}
+
 describe("App editorial setup workspace", () => {
   beforeEach(() => {
     window.localStorage.clear();
     window.localStorage.setItem("lang", "en");
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    toJpegMock.mockReset();
+    toJpegMock.mockResolvedValue("data:image/jpeg;base64,AAEC");
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    const mutableNavigator = navigator as unknown as Record<string, unknown>;
+    delete mutableNavigator.canShare;
+    delete mutableNavigator.share;
+    delete mutableNavigator.clipboard;
   });
 
   it("opens directly to the labeled Prefect Rota workspace", async () => {
@@ -216,5 +242,170 @@ describe("App editorial setup workspace", () => {
     expect(screen.getByRole("checkbox", { name: "Alice Chen Selected" })).toBeChecked();
     expect(status).toHaveAttribute("aria-live", "polite");
     expect(status).toHaveAttribute("aria-atomic", "true");
+  });
+
+  it("announces a blocked paired-slot swap and leaves every room and person label unchanged", async () => {
+    const user = await generateResult({ disableBobDouble: true });
+    const aliceSlots = screen.getAllByRole("button", { name: /Alice Chen.*Academia/i });
+    const bobSlot = screen.getByRole("button", { name: /Bob Zhang.*Charity/i });
+    const accessibleNamesBefore = [
+      ...aliceSlots.map((slot) => slot.getAttribute("aria-label")),
+      bobSlot.getAttribute("aria-label"),
+    ].sort();
+
+    expect(aliceSlots).toHaveLength(2);
+    await user.click(bobSlot);
+    await user.click(aliceSlots[0]);
+
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "This swap would move someone without double-duty permission into a paired slot.",
+      );
+    });
+    const accessibleNamesAfter = screen
+      .getAllByRole("button", { name: /Alice Chen.*Academia|Bob Zhang.*Charity/i })
+      .map((slot) => slot.getAttribute("aria-label"))
+      .sort();
+    expect(accessibleNamesAfter).toEqual(accessibleNamesBefore);
+  });
+
+  it("moves people as whole assignment slots while preserving every room label", async () => {
+    const user = await generateResult();
+    const aliceSlots = screen.getAllByRole("button", { name: /Alice Chen.*Academia/i });
+    const bobSlots = screen.getAllByRole("button", { name: /Bob Zhang.*Charity/i });
+    const paired = aliceSlots.length === 2
+      ? { person: "Alice Chen", department: "Academia", slots: aliceSlots }
+      : { person: "Bob Zhang", department: "Charity", slots: bobSlots };
+    const single = aliceSlots.length === 1
+      ? { person: "Alice Chen", department: "Academia", slot: aliceSlots[0] }
+      : { person: "Bob Zhang", department: "Charity", slot: bobSlots[0] };
+    const pairedRoomIds = paired.slots.map((slot) => slot.closest<HTMLElement>("[data-room-id]")?.dataset.roomId || "");
+    const singleRoomId = single.slot.closest<HTMLElement>("[data-room-id]")?.dataset.roomId || "";
+
+    await user.click(single.slot);
+    await user.click(paired.slots[0]);
+
+    for (const roomId of pairedRoomIds) {
+      expect(screen.getByRole("button", { name: new RegExp(`${roomId}.*${single.person}.*${single.department}`, "i") })).toBeVisible();
+    }
+    expect(screen.getByRole("button", { name: new RegExp(`${singleRoomId}.*${paired.person}.*${paired.department}`, "i") })).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent("Rota updated");
+  });
+
+  it("returns to setup without losing the brief or roster selections", async () => {
+    const user = await generateResult({ disableBobDouble: true });
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+
+    expect(screen.getByLabelText("Announcement title")).toHaveValue("Morning briefing");
+    expect(screen.getByLabelText("Announcement date")).toHaveValue("2026-07-11");
+    expect(screen.getByRole("checkbox", { name: "Alice Chen Selected" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Bob Zhang Selected" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Bob Zhang Double-duty" })).not.toBeChecked();
+  });
+
+  it("clears transient swap selection when returning to setup and generating again", async () => {
+    const user = await generateResult();
+    const firstSlot = screen.getAllByRole("button", { name: /Alice Chen.*Academia|Bob Zhang.*Charity/i })[0];
+    await user.click(firstSlot);
+    expect(firstSlot).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await user.click(screen.getByRole("button", { name: "Generate rota" }));
+    await screen.findByRole("region", { name: "Morning briefing" });
+
+    const regeneratedSlots = screen.getAllByRole("button", { name: /Alice Chen.*Academia|Bob Zhang.*Charity/i });
+    for (const slot of regeneratedSlots) expect(slot).toHaveAttribute("aria-pressed", "false");
+    await user.click(regeneratedSlots[0]);
+    expect(regeneratedSlots[0]).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Choose a different row to swap.");
+  });
+
+  it("announces clipboard unavailability when rota-code copy is unsupported", async () => {
+    const user = await generateResult();
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+
+    await user.click(screen.getByRole("button", { name: "Copy rota code" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent("Clipboard is unavailable on this device.");
+  });
+
+  it("announces unavailable sharing when neither native share nor image copy is supported", async () => {
+    const user = await generateResult();
+    Object.defineProperty(navigator, "canShare", { configurable: true, value: undefined });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+
+    await user.click(screen.getByRole("button", { name: /^Share/i }));
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Sharing is unavailable on this device."));
+  });
+
+  it("falls back to clipboard image copy when native sharing rejects", async () => {
+    const user = await generateResult();
+    const share = vi.fn().mockRejectedValue(new Error("native share failed"));
+    const write = vi.fn().mockResolvedValue(undefined);
+    class FakeClipboardItem {
+      constructor(readonly data: Record<string, Blob>) {}
+    }
+    Object.defineProperty(navigator, "canShare", { configurable: true, value: () => true });
+    Object.defineProperty(navigator, "share", { configurable: true, value: share });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { write } });
+    vi.stubGlobal("ClipboardItem", FakeClipboardItem);
+
+    await user.click(screen.getByRole("button", { name: /^Share/i }));
+
+    await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+    expect(share).toHaveBeenCalledTimes(1);
+    expect(write.mock.calls[0][0][0]).toBeInstanceOf(FakeClipboardItem);
+    expect(screen.getByRole("status")).toHaveTextContent("image copied instead");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Sharing is unavailable");
+  });
+
+  it("treats native share cancellation as a quiet return", async () => {
+    const user = await generateResult();
+    const share = vi.fn().mockRejectedValue(new DOMException("cancelled", "AbortError"));
+    const write = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "canShare", { configurable: true, value: () => true });
+    Object.defineProperty(navigator, "share", { configurable: true, value: share });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { write } });
+    vi.stubGlobal("ClipboardItem", class FakeClipboardItem {});
+
+    await user.click(screen.getByRole("button", { name: /^Share/i }));
+
+    await waitFor(() => expect(share).toHaveBeenCalledTimes(1));
+    expect(write).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).not.toHaveTextContent("Sharing is unavailable");
+  });
+
+  it("marks only the live board as exporting and always clears the marker after JPG failure", async () => {
+    toJpegMock.mockImplementation(async (node: HTMLElement) => {
+      expect(node).toHaveAttribute("data-exporting", "true");
+      throw new Error("capture failed");
+    });
+    const user = await generateResult();
+    const board = screen.getByRole("region", { name: "Morning briefing" });
+
+    await user.click(screen.getByRole("button", { name: "Download JPG" }));
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Could not generate the image"));
+    expect(board).not.toHaveAttribute("data-exporting");
+  });
+
+  it("uses fully localized result labels in Chinese mode", async () => {
+    window.localStorage.setItem("lang", "zh");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(rosterResponse()));
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByLabelText("公告标题 / Announcement title");
+    await user.type(screen.getByLabelText("公告标题 / Announcement title"), "晨间值勤");
+    fireEvent.change(screen.getByLabelText("公告日期 / Announcement date"), { target: { value: "2026-07-11" } });
+
+    await user.click(screen.getByRole("button", { name: "生成排布" }));
+    const board = await screen.findByRole("region", { name: "晨间值勤" });
+
+    expect(within(board).getByText("值勤排布单")).toBeVisible();
+    expect(screen.getByRole("region", { name: "排布操作" })).toBeVisible();
+    expect(screen.queryByText("Prefect rota / Assignment sheet")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Rota actions" })).not.toBeInTheDocument();
   });
 });

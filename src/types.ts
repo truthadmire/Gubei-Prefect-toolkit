@@ -29,6 +29,7 @@ export type ResultRow = {
   room: Room;
   formRoom: string;
   personName: string;
+  departmentName?: string;
   style: DeptStyle;
 };
 

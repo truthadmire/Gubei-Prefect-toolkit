@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Masthead from "./components/Masthead";
+import ResultWorkspace from "./components/ResultWorkspace";
 import SelectionConfirmDialog from "./components/SelectionConfirmDialog";
 import SetupWorkspace from "./components/SetupWorkspace";
 import ToastRegion from "./components/ToastRegion";
@@ -343,6 +344,7 @@ export default function App() {
       return;
     }
     setConfirmOpen(false);
+    clearTransientSwapState();
 
     const hasHistory = people.some((p) => (p.lastRooms?.length || 0) > 0 || p.lastPairKey);
     const seed = randomSeed();
@@ -358,20 +360,23 @@ export default function App() {
       setGeneratedCode(code);
       const clipboard = navigator.clipboard;
       if (!clipboard?.writeText) {
-        showToast(L.codeBoxTitle);
+        showToast(L.clipboardUnavailable);
         return;
       }
       clipboard.writeText(code).then(
         () => showToast(L.copyOk),
-        () => showToast(L.codeBoxTitle),
+        () => showToast(L.copyFail),
       );
     });
   }
 
   async function copyCode() {
+    const clipboard = navigator.clipboard;
+    if (!clipboard?.writeText) {
+      showToast(L.clipboardUnavailable);
+      return;
+    }
     try {
-      const clipboard = navigator.clipboard;
-      if (!clipboard?.writeText) throw new Error("Clipboard unavailable");
       await clipboard.writeText(generatedCode);
       showToast(L.copyOk);
     } catch {
@@ -399,6 +404,16 @@ export default function App() {
       return;
     }
     swapAssignmentsByRoom(selectedSwapRoomId, roomId);
+  }
+
+  function clearTransientSwapState() {
+    setSelectedSwapRoomId(null);
+    setDragRoomId(null);
+  }
+
+  function returnToSetup() {
+    clearTransientSwapState();
+    setStep(1);
   }
 
   const gradeOf = (form?: string) => {
@@ -483,11 +498,12 @@ export default function App() {
           room,
           formRoom: room.form ? `${room.id} (${room.form})` : room.id,
           personName,
+          departmentName: personName ? (normalizeDept(rawDept) || L.noDept) : "",
           style: deptStyleOf(rawDept),
         };
       }),
     }));
-  }, [assignmentByRoom, personByName, resultRoomGroups]);
+  }, [assignmentByRoom, personByName, resultRoomGroups, L.noDept]);
   const resultRows = useMemo(() => resultRowsByGrade.flatMap((group) => group.rows), [resultRowsByGrade]);
   const exportFileBase = useMemo(() => `${safeFilePart(title)}_${safeFilePart(dateStr)}`, [title, dateStr]);
   const nameHeader = useMemo(() => I18N[lang].colNameDept.split(" + ")[0] || "Name", [lang]);
@@ -504,14 +520,26 @@ export default function App() {
     if (cached?.key === boardExportKey && cached.exportData) return cached.exportData;
     if (cached?.key === boardExportKey && cached.promise) return cached.promise;
 
-    const promise = loadImageExporter()
-      .then(({ toJpeg }) => toJpeg(node, { quality: 0.95, pixelRatio: 3, backgroundColor: "#ffffff" }))
-      .then((dataUrl): JpegExport => ({ dataUrl, blob: dataUrlToBlob(dataUrl) }));
+    const promise = (async (): Promise<JpegExport> => {
+      node.setAttribute("data-exporting", "true");
+      try {
+        const { toJpeg } = await loadImageExporter();
+        const dataUrl = await toJpeg(node, { quality: 0.95, pixelRatio: 3, backgroundColor: "#ffffff" });
+        return { dataUrl, blob: dataUrlToBlob(dataUrl) };
+      } finally {
+        node.removeAttribute("data-exporting");
+      }
+    })();
 
     imageExportCache.current = { key: boardExportKey, promise };
-    const exportData = await promise;
-    imageExportCache.current = { key: boardExportKey, exportData };
-    return exportData;
+    try {
+      const exportData = await promise;
+      imageExportCache.current = { key: boardExportKey, exportData };
+      return exportData;
+    } catch (error) {
+      if (imageExportCache.current?.promise === promise) imageExportCache.current = null;
+      throw error;
+    }
   }
 
   useEffect(() => {
@@ -559,31 +587,45 @@ export default function App() {
   // 2. Fallback to Copy Image
   // 3. Show a normal failure toast
   async function shareImage() {
+    let image: JpegExport | null;
     try {
-      const image = await getJpegExport();
-      if (!image) return;
-      const file = new File([image.blob], `${exportFileBase}.jpg`, { type: "image/jpeg" });
-
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title, text: dateStr });
-        return;
-      }
-
-      const canWrite =
-        typeof navigator.clipboard?.write === "function" &&
-        typeof ClipboardItem !== "undefined";
-
-      if (canWrite) {
-        await navigator.clipboard.write([new ClipboardItem({ "image/jpeg": image.blob })]);
-        showToast(L.shareFail);
-        return;
-      }
-
-      throw new Error("No share/copy support");
+      image = await getJpegExport();
     } catch (e) {
       console.warn(e);
       showToast(L.jpgFail);
+      return;
     }
+    if (!image) return;
+
+    const file = new File([image.blob], `${exportFileBase}.jpg`, { type: "image/jpeg" });
+    const copyImageFallback = async (): Promise<boolean> => {
+      if (typeof navigator.clipboard?.write !== "function" || typeof ClipboardItem === "undefined") {
+        return false;
+      }
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ "image/jpeg": image.blob })]);
+        showToast(L.shareFail);
+        return true;
+      } catch (error) {
+        console.warn(error);
+        return false;
+      }
+    };
+
+    if (navigator.canShare?.({ files: [file] }) && typeof navigator.share === "function") {
+      try {
+        await navigator.share({ files: [file], title, text: dateStr });
+        return;
+      } catch (error) {
+        if (typeof error === "object" && error !== null && "name" in error && error.name === "AbortError") {
+          return;
+        }
+        console.warn(error);
+      }
+    }
+
+    if (await copyImageFallback()) return;
+    showToast(L.shareUnavailable);
   }
 
   function downloadExcel() {
@@ -661,7 +703,7 @@ export default function App() {
   }
 
   return (
-    <div className={step === 1 ? "app-shell" : "min-h-screen bg-black text-white"}>
+    <div className={step === 1 ? "app-shell" : "result-shell"}>
       <ToastRegion message={toast?.text} />
       {confirmOpen && (
         <SelectionConfirmDialog
@@ -705,102 +747,39 @@ export default function App() {
       )}
 
       {step === 2 && (
-        <div className="max-w-6xl mx-auto p-2 md:p-4 pb-20">
-          <div ref={boardRef} className="bg-slate-50 text-slate-950 rounded-xl p-2.5 md:p-5 shadow-2xl">
-            <div className="flex flex-col gap-1.5 border-b-2 border-slate-900 pb-2.5 md:flex-row md:items-end md:justify-between">
-              <div className="min-w-0 text-lg font-black leading-tight tracking-tight md:text-2xl">{title}</div>
-              <div className="shrink-0 text-left md:text-right">
-                <div className="text-[11px] font-black uppercase tracking-widest text-slate-500">{I18N[lang].date}</div>
-                <div className="text-lg font-black tabular-nums md:text-xl">{dateStr}</div>
-              </div>
-            </div>
-            <div className="mt-2 rounded-md bg-slate-200 px-2.5 py-1.5 text-[11px] font-bold text-slate-700">
-              {I18N[lang].dragHint}
-            </div>
-
-            <div className="mt-3 overflow-hidden rounded-lg border-2 border-slate-900 bg-white">
-              <div className="divide-y divide-slate-200">
-                {resultRows.map((row) => {
-                  const cellStyle: React.CSSProperties = row.personName
-                    ? { background: row.style.bg, color: row.style.fg, boxShadow: row.style.border ? `inset 0 0 0 1px ${row.style.border}` : undefined }
-                    : { background: "#F8FAFC", color: "#94A3B8" };
-                  const isSelectedForSwap = selectedSwapRoomId === row.room.id;
-                  return (
-                    <div key={row.room.id} className="grid min-h-[38px] grid-cols-[116px_minmax(0,1fr)] md:min-h-[42px] md:grid-cols-[132px_minmax(0,1fr)]">
-                      <div className="flex items-center border-r border-slate-200 bg-slate-100 px-2.5 py-1.5 text-base font-black leading-tight tracking-tight text-slate-900 md:text-lg">
-                        {row.formRoom}
-                      </div>
-                      <div
-                        className={`${isSelectedForSwap ? "ring-2 ring-blue-600 ring-inset" : ""} flex min-w-0 items-center px-3 py-1.5 text-base transition md:text-lg ${row.personName ? "cursor-move select-none touch-manipulation" : ""}`}
-                        style={cellStyle}
-                        draggable={!!row.personName}
-                        role={row.personName ? "button" : undefined}
-                        tabIndex={row.personName ? 0 : undefined}
-                        onClick={() => handleResultCellClick(row.room.id)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            handleResultCellClick(row.room.id);
-                          }
-                        }}
-                        onDragStart={(e) => {
-                          if (!row.personName) return;
-                          setDragRoomId(row.room.id);
-                          e.dataTransfer.effectAllowed = "move";
-                          e.dataTransfer.setData("text/plain", row.room.id);
-                        }}
-                        onDragOver={(e) => {
-                          if (row.personName) e.preventDefault();
-                        }}
-                        onDrop={(e) => {
-                          e.preventDefault();
-                          const sourceRoomId = e.dataTransfer.getData("text/plain") || dragRoomId;
-                          if (sourceRoomId) swapAssignmentsByRoom(sourceRoomId, row.room.id);
-                        }}
-                        onDragEnd={() => setDragRoomId(null)}
-                      >
-                        <span className="min-w-0 truncate font-black leading-tight">{row.personName || "-"}</span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-            
-          </div>
-
-          <div className="mt-6 flex flex-col gap-3">
-             <div className="flex gap-3">
-              <button onClick={() => setStep(1)} className="rounded-xl bg-neutral-700 hover:bg-neutral-600 py-3 px-6 font-bold flex-1">
-                {I18N[lang].back}
-              </button>
-              <button onClick={downloadImage} className="rounded-xl bg-amber-600 hover:bg-amber-700 py-3 px-6 font-bold flex-1 shadow-lg">
-                 {I18N[lang].download}
-              </button>
-             </div>
-             <button onClick={shareImage} className="rounded-xl bg-emerald-600 hover:bg-emerald-700 py-3 px-6 font-bold w-full shadow-lg shadow-emerald-900/20">
-               {I18N[lang].exportShare}
-             </button>
-             <button onClick={downloadExcel} className="rounded-xl bg-sky-600 hover:bg-sky-700 py-3 px-6 font-bold w-full shadow-lg shadow-sky-900/20">
-               {I18N[lang].downloadExcel}
-             </button>
-          </div>
-
-          <div className="mt-6 bg-neutral-900 rounded-2xl p-4 shadow-lg">
-            <div className="flex items-center justify-between mb-2">
-              <div className="font-semibold text-sm md:text-base">{I18N[lang].codeBoxTitle}</div>
-              <button onClick={copyCode} className="rounded bg-blue-600 hover:bg-blue-700 px-3 py-1.5 text-xs font-bold uppercase tracking-wide">
-                {I18N[lang].copy}
-              </button>
-            </div>
-            <textarea
-              className="w-full h-20 rounded bg-neutral-800 border border-neutral-700 p-2 font-mono text-xs text-neutral-300 focus:outline-none"
-              readOnly
-              value={generatedCode}
-              onFocus={(e) => e.currentTarget.select()}
-            />
-          </div>
-        </div>
+        <ResultWorkspace
+          title={title}
+          date={dateStr}
+          dateLabel={L.date}
+          dragHint={L.dragHint}
+          rowsByGrade={resultRowsByGrade}
+          selectedSwapRoomId={selectedSwapRoomId}
+          generatedCode={generatedCode}
+          boardRef={boardRef}
+          labels={{
+            back: L.back,
+            downloadJpg: L.download,
+            share: L.exportShare,
+            downloadExcel: L.downloadExcel,
+            copyCode: L.copy,
+            gradeTitle: L.gradeTitle,
+            codeTitle: L.codeBoxTitle,
+            assignmentSheet: L.assignmentSheet,
+            actionsLabel: L.actionsLabel,
+            unassigned: L.unassigned,
+          }}
+          onActivateRoom={handleResultCellClick}
+          onBack={returnToSetup}
+          onDownloadJpg={downloadImage}
+          onShare={shareImage}
+          onDownloadExcel={downloadExcel}
+          onCopyCode={copyCode}
+          onDragStart={setDragRoomId}
+          onDrop={(targetRoomId) => {
+            if (dragRoomId) swapAssignmentsByRoom(dragRoomId, targetRoomId);
+          }}
+          onDragEnd={() => setDragRoomId(null)}
+        />
       )}
     </div>
   );

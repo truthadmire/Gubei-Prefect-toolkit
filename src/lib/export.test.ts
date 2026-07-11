@@ -19,6 +19,7 @@ function resultRow(overrides: Partial<ResultRow> = {}): ResultRow {
     },
     formRoom: "N201 (9&A)",
     personName: "A < B",
+    departmentName: "Academia",
     style: { bg: "#FFFFFF", fg: "#000000", border: "#BDBDBD" },
     ...overrides,
   };
@@ -90,6 +91,7 @@ describe("export utility boundaries", () => {
       ["room enabled state", ["en", "Morning", "2026-07-11", [resultRow({ room: { ...row.room, enabled: false } })]]],
       ["displayed room", ["en", "Morning", "2026-07-11", [resultRow({ formRoom: "N299 (9A)" })]]],
       ["person", ["en", "Morning", "2026-07-11", [resultRow({ personName: "C" })]]],
+      ["department", ["en", "Morning", "2026-07-11", [resultRow({ departmentName: "Charity" })]]],
       ["background", ["en", "Morning", "2026-07-11", [resultRow({ style: { ...row.style, bg: "#EEEEEE" } })]]],
       ["foreground", ["en", "Morning", "2026-07-11", [resultRow({ style: { ...row.style, fg: "#111111" } })]]],
       ["border", ["en", "Morning", "2026-07-11", [resultRow({ style: { ...row.style, border: "#AAAAAA" } })]]],

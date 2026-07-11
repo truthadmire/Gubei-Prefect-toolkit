@@ -153,6 +153,7 @@ export function buildBoardExportKey(
       row.room.enabled,
       row.formRoom,
       row.personName,
+      row.departmentName ?? "",
       row.style.bg,
       row.style.fg,
       row.style.border ?? "",
