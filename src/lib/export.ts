@@ -1,4 +1,5 @@
-import type { Lang, ResultRow } from "../types";
+import type { Lang } from "../i18n";
+import type { ResultRow } from "../types";
 
 export type ExcelExportOptions = {
   title: string;

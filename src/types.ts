@@ -56,5 +56,3 @@ export type RosterJson = {
   people: { name: string; dept?: string }[];
   rooms: { id: string; form?: string }[];
 };
-
-export type Lang = "zh" | "en";

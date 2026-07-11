@@ -1,6 +1,13 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import Masthead from "./components/Masthead";
+import SelectionConfirmDialog from "./components/SelectionConfirmDialog";
+import SetupWorkspace from "./components/SetupWorkspace";
+import ToastRegion from "./components/ToastRegion";
+import { I18N } from "./i18n";
+import type { Lang } from "./i18n";
+import { deptOrderOf, deptStyleOf, normalizeDept } from "./lib/departments";
 import {
   applyImportedAssignments,
   generateAssignment,
@@ -16,7 +23,6 @@ import {
 import type { GenerationFailure, GenerationSummary, SwapResult } from "./lib/rota";
 import {
   GENERATION_HISTORY_KEY,
-  formatHistoryLabel,
   mergeGenerationHistory,
   readGenerationHistoryFrom,
   writeGenerationHistory,
@@ -31,12 +37,10 @@ import {
 } from "./lib/export";
 import type {
   Assignment,
-  DeptStyle,
   FormGroup,
   GenerationHistoryItem,
   JpegExport,
   JpegExportCache,
-  Lang,
   Person,
   PersonGroup,
   ResultRow,
@@ -44,212 +48,6 @@ import type {
   RoomGroup,
   RosterJson,
 } from "./types";
-
-/** =========================
- * I18N
- * ========================= */
-const I18N: Record<Lang, any> = {
-  zh: {
-    setup: "准备界面",
-    result: "成品界面",
-    titlePh: "输入公告标题 / Enter announcement title",
-    titleRequired: "请输入公告标题",
-    datePh: "输入公告日期 / Enter date of announcement",
-    dateRequired: "请输入公告日期",
-    emptyPeople: "请至少选择一位 Prefect。",
-    emptyRooms: "请至少选择一个班级。",
-    generationInfeasible: "当前选择无法满足房间覆盖规则，请调整人员或班级。",
-    confirmTitle: "确认继续？",
-    confirmBody: "有人员或班级未被选中，本次排布将跳过以下项目。",
-    confirmPeople: "未选 Prefect",
-    confirmForms: "未选班级",
-    confirmBack: "返回修改",
-    confirmContinue: "仍然继续",
-    date: "日期",
-    lastCodePh: "上一轮排布码（粘贴最近一条；支持 v1/v2）",
-    status: (peo: number, rooms: number, pairs: number, can: number) =>
-      `Prefects: ${peo}，房间: ${rooms}（需 ${pairs} 位双班；可双班: ${can}）`,
-    peopleSel: "Prefect 选择",
-    formSel: "班级（Form）选择",
-    next: "下一步",
-    back: "返回",
-    exportShare: "分享 (手机/AirDrop)",
-    download: "下载图片",
-    downloadExcel: "下载 Excel",
-    copyJPG: "复制图片",
-    copyJPGOk: "图片已复制到剪贴板",
-    jpgFail: "图片生成失败，请重试。",
-    excelOk: "Excel 表格已下载",
-    excelFail: "Excel 表格生成失败，请重试。",
-    shareFail: "当前设备不支持直接分享，已自动为您复制图片",
-    codeBoxTitle: "排布码（已生成，粘贴到下一轮以避免重复）",
-    copy: "复制",
-    copyOk: "排布码已复制",
-    copyFail: "复制失败，请手动选择复制",
-    importOk: "已导入上一轮排布码",
-    importFail: "排布码无效或不兼容",
-    historyTitle: "本机历史",
-    historySelect: "选择历史记录",
-    historyUse: "载入",
-    historyClear: "清空",
-    historyLoaded: "已载入本机历史排布码",
-    historyCleared: "本机历史已清空",
-    colFormRoom: "班级 + 房号",
-    colNameDept: "姓名 + 部门",
-    gradeTitle: (grade: number) => (grade === 999 ? "其他班级" : `${grade} 年级`),
-    gradeToggle: "整级",
-    doubleDutyBadge: "双班",
-    dragHint: "拖动人员到另一行交换位置；手机可点选两行交换。",
-    dragDoubleBlocked: (name: string) => `${name} 未开启双班，不能移动到双班位置。`,
-    dragDoubleBlockedGeneric: "此交换会将未开启双班的人员移到双班位置。",
-    dragHepburnBlocked: "Hepburn He 不能被安排到 12 年级班级。",
-    dragMissing: "无法找到要交换的排布位置。",
-    dragSameSlot: "请选择另一行进行交换。",
-    dragUpdated: "排布已更新",
-    languageLabel: "语言/Language",
-    languageZh: "中文",
-    languageEn: "English",
-    ddLabel: "双班",
-    ddTooFew: (need: number, have: number) =>
-      `可双班人员不足：需要 ${need} 位，当前 ${have} 位。请勾选更多“双班”或减少房间数。`,
-    loading: "正在加载名单…",
-    rosterLoadFail: "无法加载 roster.json，请确认已放在 public/ 目录。",
-    noDept: "未分类",
-    footer: "由 Gubei Prefect Toolkit 生成",
-  },
-  en: {
-    setup: "Setup",
-    result: "Result",
-    titlePh: "Enter announcement title",
-    titleRequired: "Please enter an announcement title.",
-    datePh: "Enter date of announcement",
-    dateRequired: "Please enter the announcement date.",
-    emptyPeople: "Select at least one Prefect.",
-    emptyRooms: "Select at least one form.",
-    generationInfeasible: "These selections cannot satisfy the room-coverage rules. Adjust the people or forms.",
-    confirmTitle: "Continue?",
-    confirmBody: "Some people or forms are not selected. This rota will skip the following items.",
-    confirmPeople: "Deselected Prefects",
-    confirmForms: "Deselected Forms",
-    confirmBack: "Go Back",
-    confirmContinue: "Continue Anyway",
-    date: "Date",
-    lastCodePh: "Last rota code (paste the latest; supports v1/v2)",
-    status: (peo: number, rooms: number, pairs: number, can: number) =>
-      `Prefects: ${peo}, Rooms: ${rooms} (need ${pairs} double-duty; available: ${can})`,
-    peopleSel: "Prefects",
-    formSel: "Forms",
-    next: "Next",
-    back: "Back",
-    exportShare: "Share (Mobile/AirDrop)",
-    download: "Download JPG",
-    downloadExcel: "Download Excel",
-    copyJPG: "Copy Image",
-    copyJPGOk: "Image copied to clipboard",
-    jpgFail: "Could not generate the image. Please try again.",
-    excelOk: "Excel table downloaded",
-    excelFail: "Could not generate the Excel table. Please try again.",
-    shareFail: "Sharing not supported on this device, image copied instead.",
-    codeBoxTitle: "Rota Code (paste next time to avoid repeats)",
-    copy: "Copy",
-    copyOk: "Rota code copied",
-    copyFail: "Copy failed, please select and copy",
-    importOk: "Imported last rota code",
-    importFail: "Invalid or incompatible rota code",
-    historyTitle: "Local History",
-    historySelect: "Select generation history",
-    historyUse: "Load",
-    historyClear: "Clear",
-    historyLoaded: "Loaded local history rota code",
-    historyCleared: "Local history cleared",
-    colFormRoom: "Class + Room",
-    colNameDept: "Name + Department",
-    gradeTitle: (grade: number) => (grade === 999 ? "Other Forms" : `Grade ${grade}`),
-    gradeToggle: "All",
-    doubleDutyBadge: "Double",
-    dragHint: "Drag a person to another row to swap positions. On phone, tap two rows to swap.",
-    dragDoubleBlocked: (name: string) => `${name} is not enabled for double duty and cannot move to a double-duty slot.`,
-    dragDoubleBlockedGeneric: "This swap would move someone without double-duty permission into a paired slot.",
-    dragHepburnBlocked: "Hepburn He cannot be assigned to Grade 12 forms.",
-    dragMissing: "Could not find the rota positions to swap.",
-    dragSameSlot: "Choose a different row to swap.",
-    dragUpdated: "Rota updated",
-    languageLabel: "Language",
-    languageZh: "Chinese",
-    languageEn: "English",
-    ddLabel: "Double",
-    ddTooFew: (need: number, have: number) =>
-      `Not enough double-duty people: need ${need}, have ${have}. Enable more "Double" or reduce rooms.`,
-    loading: "Loading roster...",
-    rosterLoadFail: "Could not load roster.json. Confirm it is in the public/ folder.",
-    noDept: "No Department",
-    footer: "Generated via Gubei Prefect Toolkit",
-  },
-};
-
-/** =========================
- * Dept color (from Key)
- * ========================= */
-function normalizeDept(raw?: string): string {
-  if (!raw) return "";
-  const s = raw.trim();
-  const lower = s.toLowerCase();
-
-  if (lower === "visual art") return "Art";
-  if (lower === "art") return "Art";
-  if (lower === "theater") return "Theatre";
-
-  if (lower === "red hc" || lower === "red house captain") return "Red House Captain";
-  if (lower === "green hc" || lower === "green house captain") return "Green House Captain";
-  if (lower === "blue hc" || lower === "blue house captain") return "Blue House Captain";
-  if (lower === "yellow hc" || lower === "yellow house captain") return "Yellow House Captain";
-
-  return s;
-}
-
-const DEPT_STYLE: Record<string, DeptStyle> = {
-  Charity: { bg: "#D6A07E", fg: "#000000" },
-  Art: { bg: "#79C3E8", fg: "#000000" },
-  Community: { bg: "#D6FF4A", fg: "#000000" },
-  Academia: { bg: "#B59ACB", fg: "#000000" },
-  Media: { bg: "#4B235A", fg: "#FFFFFF" },
-  Sports: { bg: "#E59B1E", fg: "#000000" },
-  Music: { bg: "#FFFFFF", fg: "#000000", border: "#BDBDBD" },
-  Theatre: { bg: "#B9FFFF", fg: "#000000" },
-
-  "Red House Captain": { bg: "#D63A2E", fg: "#000000" },
-  "Green House Captain": { bg: "#6B7E55", fg: "#000000" },
-  "Blue House Captain": { bg: "#93A1AB", fg: "#000000" },
-  "Yellow House Captain": { bg: "#FFF06A", fg: "#000000" },
-
-  "no need": { bg: "#BDBDBD", fg: "#000000" },
-};
-
-const DEPT_ORDER = [
-  "Academia",
-  "Charity",
-  "Community",
-  "Media",
-  "Music",
-  "Theatre",
-  "Art",
-  "Red House Captain",
-  "Blue House Captain",
-  "Green House Captain",
-  "Yellow House Captain",
-  "Sports",
-  "no need",
-];
-
-function deptStyleOf(raw?: string): DeptStyle {
-  const dept = normalizeDept(raw);
-  if (!dept) return { bg: "#FFFFFF", fg: "#000000" };
-  return DEPT_STYLE[dept] || { bg: "#FFFFFF", fg: "#000000" };
-}
-function deptOrderOf(raw?: string): number {
-  const idx = DEPT_ORDER.indexOf(normalizeDept(raw));
-  return idx === -1 ? DEPT_ORDER.length : idx;
-}
 
 /** =========================
  * Utils
@@ -260,7 +58,27 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
   const res = await fetch("/roster.json");
   if (!res.ok) throw new Error("roster.json not found");
-  const j: RosterJson = await res.json();
+  const value: unknown = await res.json();
+  if (!value || typeof value !== "object") throw new Error("Invalid roster.json");
+  const candidate = value as Partial<RosterJson>;
+  if (!Array.isArray(candidate.people) || !Array.isArray(candidate.rooms)) {
+    throw new Error("Invalid roster.json");
+  }
+  if (!candidate.people.every((person) => (
+    !!person && typeof person === "object" &&
+    typeof person.name === "string" &&
+    (person.dept === undefined || typeof person.dept === "string")
+  ))) {
+    throw new Error("Invalid roster.json people");
+  }
+  if (!candidate.rooms.every((room) => (
+    !!room && typeof room === "object" &&
+    typeof room.id === "string" &&
+    (room.form === undefined || typeof room.form === "string")
+  ))) {
+    throw new Error("Invalid roster.json rooms");
+  }
+  const j = candidate as RosterJson;
 
   const people: Person[] = j.people.map((p) => ({
     id: uid(),
@@ -292,24 +110,23 @@ async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
  * ========================= */
 export default function App() {
   const [lang, setLang] = useState<Lang>("zh");
-  const currentLanguage = useRef<Lang>("zh");
   const [clientStateHydrated, setClientStateHydrated] = useState(false);
   const L = I18N[lang];
 
   function updateLanguage(nextLanguage: Lang) {
-    currentLanguage.current = nextLanguage;
     setLang(nextLanguage);
   }
 
-  const [loaded, setLoaded] = useState(false);
+  const [rosterState, setRosterState] = useState<"loading" | "error" | "ready">("loading");
+  const [rosterAttempt, setRosterAttempt] = useState(0);
   const [people, setPeople] = useState<Person[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
 
   const [step, setStep] = useState<1 | 2>(1);
   const [title, setTitle] = useState("");
   const [dateStr, setDateStr] = useState("");
-  const [dateInputType, setDateInputType] = useState<"text" | "date">("text");
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const generateButtonRef = useRef<HTMLButtonElement>(null);
   const [dragRoomId, setDragRoomId] = useState<string | null>(null);
   const [selectedSwapRoomId, setSelectedSwapRoomId] = useState<string | null>(null);
   const [rotaCodeIn, setRotaCodeIn] = useState("");
@@ -364,19 +181,26 @@ export default function App() {
   }, [generationHistory]);
 
   useEffect(() => {
+    let cancelled = false;
+    setRosterState("loading");
     loadRoster()
       .then(({ people, rooms }) => {
+        if (cancelled) return;
         setPeople(people);
         setRooms(rooms);
         const forms = Array.from(new Set(rooms.map((r) => r.form || ""))).filter(Boolean).sort();
         setAllowedForms(new Set(forms));
-        setLoaded(true);
+        setRosterState("ready");
       })
       .catch((e) => {
+        if (cancelled) return;
         console.error(e);
-        alert(I18N[currentLanguage.current].rosterLoadFail);
+        setRosterState("error");
       });
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [rosterAttempt]);
 
   useEffect(() => {
     if (!rotaCodeIn.trim() || !people.length) return;
@@ -419,7 +243,6 @@ export default function App() {
     if (!selected) return;
     setTitle(selected.title);
     setDateStr(selected.date);
-    setDateInputType("date");
     setRotaCodeIn(selected.code);
     showToast(L.historyLoaded);
   }
@@ -458,15 +281,6 @@ export default function App() {
     () => getGenerationSummary(people, filteredRooms),
     [people, filteredRooms],
   );
-
-  const statusText = useMemo(() => {
-    return L.status(
-      generationSummary.activePeople,
-      generationSummary.enabledRooms,
-      generationSummary.requiredDouble,
-      generationSummary.availableDouble,
-    );
-  }, [generationSummary, L]);
 
   function toggleForm(form: string) {
     setAllowedForms((prev) => {
@@ -816,262 +630,78 @@ export default function App() {
     generationSummary.hasCapacity &&
     generationSummary.feasible;
 
-  if (!loaded) {
+  if (rosterState !== "ready") {
     return (
-      <main className="min-h-screen flex items-center justify-center text-neutral-400">
-        <h1 className="visually-hidden">Gubei Prefect Toolkit</h1>
-        <div>{L.loading}</div>
-      </main>
+      <div className="app-shell">
+        <Masthead copy={L} lang={lang} onLanguageChange={updateLanguage} />
+        <main className="roster-state">
+          {rosterState === "loading" ? (
+            <section className="sheet roster-loading" aria-labelledby="roster-loading-heading">
+              <p className="sheet-kicker">Roster</p>
+              <h2 id="roster-loading-heading">{L.loading}</h2>
+            </section>
+          ) : (
+            <section className="sheet recovery-sheet" role="alert" aria-labelledby="roster-recovery-heading">
+              <p className="sheet-kicker">Recovery</p>
+              <h2 id="roster-recovery-heading">{L.rosterRecoveryTitle}</h2>
+              <p>{L.rosterRecoveryBody}</p>
+              <button
+                type="button"
+                className="button button--primary"
+                onClick={() => setRosterAttempt((attempt) => attempt + 1)}
+              >
+                {L.rosterRetry}
+              </button>
+            </section>
+          )}
+        </main>
+        <ToastRegion message={toast?.text} />
+      </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-black text-white">
-      {toast && (
-        <div className="fixed bottom-8 left-1/2 transform -translate-x-1/2 z-50 w-max max-w-[90vw]">
-          <div className="bg-white text-black rounded-full shadow-lg px-6 py-3 font-medium text-center">{toast.text}</div>
-        </div>
-      )}
-
+    <div className={step === 1 ? "app-shell" : "min-h-screen bg-black text-white"}>
+      <ToastRegion message={toast?.text} />
       {confirmOpen && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4">
-          <div className="w-full max-w-lg rounded-2xl border border-neutral-700 bg-neutral-900 p-5 shadow-2xl">
-            <div className="text-xl font-bold">{I18N[lang].confirmTitle}</div>
-            <div className="mt-2 text-sm text-neutral-300">{I18N[lang].confirmBody}</div>
-
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              {deselectedPeople.length > 0 && (
-                <div className="rounded-xl bg-neutral-800 p-3">
-                  <div className="mb-2 text-xs font-bold uppercase tracking-wide text-neutral-400">{I18N[lang].confirmPeople}</div>
-                  <div className="max-h-44 overflow-y-auto pr-1 text-sm text-neutral-100 custom-scrollbar">
-                    {deselectedPeople.map((p) => (
-                      <div key={p.id} className="border-b border-neutral-700 py-1 last:border-b-0">
-                        {p.name}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {deselectedForms.length > 0 && (
-                <div className="rounded-xl bg-neutral-800 p-3">
-                  <div className="mb-2 text-xs font-bold uppercase tracking-wide text-neutral-400">{I18N[lang].confirmForms}</div>
-                  <div className="flex max-h-44 flex-wrap gap-1.5 overflow-y-auto pr-1 custom-scrollbar">
-                    {deselectedForms.map((form) => (
-                      <span key={form} className="rounded-md bg-neutral-700 px-2 py-1 text-xs font-semibold text-neutral-100">
-                        {form}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="mt-5 flex flex-col gap-2 sm:flex-row">
-              <button
-                onClick={() => setConfirmOpen(false)}
-                className="rounded-xl bg-neutral-700 px-4 py-3 font-bold hover:bg-neutral-600 sm:flex-1"
-              >
-                {I18N[lang].confirmBack}
-              </button>
-              <button
-                onClick={() => doGenerate(true)}
-                className="rounded-xl bg-blue-600 px-4 py-3 font-bold hover:bg-blue-700 sm:flex-1"
-              >
-                {I18N[lang].confirmContinue}
-              </button>
-            </div>
-          </div>
-        </div>
+        <SelectionConfirmDialog
+          copy={L}
+          deselectedPeople={deselectedPeople}
+          deselectedForms={deselectedForms}
+          opener={generateButtonRef}
+          onCancel={() => setConfirmOpen(false)}
+          onContinue={() => doGenerate(true)}
+        />
       )}
 
-      <div className="max-w-6xl mx-auto p-4">
-        <div className="flex items-center justify-between mb-4">
-          <div className="text-xl md:text-2xl font-bold">{step === 1 ? I18N[lang].setup : I18N[lang].result}</div>
-
-          {step === 1 && (
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-neutral-400 hidden md:inline">{I18N[lang].languageLabel}</span>
-              <select
-                value={lang}
-                onChange={(e) => updateLanguage(e.target.value as Lang)}
-                className="bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-sm"
-              >
-                <option value="zh">{I18N[lang].languageZh}</option>
-                <option value="en">{I18N[lang].languageEn}</option>
-              </select>
-            </div>
-          )}
-        </div>
-      </div>
+      {step === 1 && <Masthead copy={L} lang={lang} onLanguageChange={updateLanguage} />}
 
       {step === 1 && (
-        <div className="max-w-6xl mx-auto p-2 md:p-4">
-          <div className="bg-neutral-900 rounded-2xl p-4 md:p-6 shadow-xl">
-            {/* Input Row */}
-            <div className="flex flex-col gap-3 md:flex-row md:items-center">
-              <input
-                className="flex-1 rounded-lg px-4 py-3 bg-neutral-800 border border-neutral-700 text-sm md:text-base placeholder:text-neutral-500 focus:ring-2 focus:ring-blue-500 outline-none"
-                placeholder={I18N[lang].titlePh}
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-              />
-              <input
-                type={dateInputType}
-                className="rounded-lg px-4 py-3 bg-neutral-800 border border-neutral-700 text-sm md:text-base placeholder:text-neutral-500 outline-none"
-                placeholder={I18N[lang].datePh}
-                value={dateStr}
-                onChange={(e) => setDateStr(e.target.value)}
-                onFocus={() => setDateInputType("date")}
-                onBlur={() => {
-                  if (!dateStr) setDateInputType("text");
-                }}
-              />
-              <input
-                className="w-full md:w-[460px] rounded-lg px-4 py-3 bg-neutral-800 border border-neutral-700 text-sm md:text-base outline-none"
-                placeholder={I18N[lang].lastCodePh}
-                value={rotaCodeIn}
-                onChange={(e) => setRotaCodeIn(e.target.value)}
-              />
-            </div>
-
-            <div className="mt-3 text-xs md:text-sm text-neutral-400 px-1">{statusText}</div>
-
-            {generationHistory.length > 0 && (
-              <div className="mt-3 flex flex-col gap-2 rounded-xl border border-neutral-700 bg-neutral-800 p-3 md:flex-row md:items-center">
-                <div className="shrink-0 text-sm font-semibold text-neutral-100">{I18N[lang].historyTitle}</div>
-                <select
-                  value={selectedHistoryId}
-                  onChange={(e) => setSelectedHistoryId(e.target.value)}
-                  className="min-w-0 flex-1 rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100"
-                  aria-label={I18N[lang].historySelect}
-                >
-                  {generationHistory.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {formatHistoryLabel(item)}
-                    </option>
-                  ))}
-                </select>
-                <div className="flex gap-2">
-                  <button
-                    onClick={loadSelectedHistory}
-                    disabled={!selectedHistoryId}
-                    className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-950 disabled:text-blue-100/50"
-                  >
-                    {I18N[lang].historyUse}
-                  </button>
-                  <button
-                    onClick={clearGenerationHistory}
-                    className="rounded-lg bg-neutral-700 px-4 py-2 text-sm font-bold hover:bg-neutral-600"
-                  >
-                    {I18N[lang].historyClear}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Layout: Fixed height on desktop to enable internal scrolling */}
-            <div className="mt-4 flex flex-col gap-4">
-              <div className="grid grid-cols-1 gap-4 md:h-[600px] md:grid-cols-[minmax(280px,0.9fr)_minmax(0,1.7fr)]">
-              
-              {/* People Column */}
-              <div className="bg-neutral-800 rounded-xl p-3 flex flex-col h-[40vh] md:h-full min-h-0">
-                <div className="font-semibold mb-2 px-1 shrink-0">{I18N[lang].peopleSel}</div>
-                <div className="flex-1 overflow-y-auto min-h-0 pr-1 custom-scrollbar">
-                  {personGroups.map((group) => (
-                    <section key={group.dept} className="mb-3 last:mb-0">
-                      <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-neutral-600 bg-neutral-800 py-2 text-xs font-bold uppercase tracking-wide text-neutral-300">
-                        <span
-                          style={{ width: 12, height: 12, borderRadius: 999, background: group.style.bg, border: `1px solid ${group.style.border || "rgba(255,255,255,0.35)"}` }}
-                          className="shrink-0"
-                        />
-                        <span>{group.dept}</span>
-                      </div>
-                      <div className="divide-y divide-neutral-700">
-                        {group.people.map((p) => {
-                          const st = deptStyleOf(p.dept);
-                          return (
-                            <div key={p.id} className="flex items-center justify-between py-2">
-                              <label className="flex items-center gap-3 cursor-pointer flex-1">
-                                <input type="checkbox" className="w-5 h-5 rounded accent-blue-600" checked={p.active} onChange={() => togglePerson(p.id)} />
-                                <span
-                                  style={{ width: 12, height: 12, borderRadius: 999, background: st.bg, border: `1px solid ${st.border || "rgba(0,0,0,0.25)"}` }}
-                                  className="shrink-0"
-                                />
-                                <span className="text-sm md:text-base">{p.name}</span>
-                              </label>
-                              <label className="flex items-center gap-2 cursor-pointer p-1">
-                                <span className="text-xs text-neutral-400">{I18N[lang].ddLabel}</span>
-                                <input type="checkbox" className="w-4 h-4 rounded accent-blue-600" checked={p.canDouble} onChange={() => toggleDouble(p.id)} />
-                              </label>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </section>
-                  ))}
-                </div>
-              </div>
-
-              {/* Forms Column */}
-              <div className="bg-neutral-800 rounded-xl p-3 flex flex-col h-[30vh] md:h-full min-h-0">
-                <div className="font-semibold mb-2 px-1 shrink-0">{I18N[lang].formSel}</div>
-                <div className="flex-1 overflow-y-auto min-h-0 pr-1 custom-scrollbar">
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 md:grid-cols-2 lg:grid-cols-4">
-                    {formGroups.map((group) => {
-                      const selectedCount = group.forms.filter((form) => allowedForms.has(form)).length;
-                      const allSelected = selectedCount === group.forms.length;
-                      const partiallySelected = selectedCount > 0 && !allSelected;
-                      return (
-                        <div key={group.grade} className="rounded-lg border border-neutral-700 bg-neutral-900/50 p-2">
-                          <label className="mb-2 flex cursor-pointer items-center justify-between gap-2 border-b border-neutral-700 pb-2">
-                            <span className="text-xs font-bold uppercase tracking-wide text-neutral-200">{I18N[lang].gradeTitle(group.grade)}</span>
-                            <span className="flex items-center gap-1 text-[11px] text-neutral-400">
-                              {I18N[lang].gradeToggle}
-                              <input
-                                type="checkbox"
-                                className="h-4 w-4 rounded accent-emerald-500"
-                                checked={allSelected}
-                                ref={(el) => {
-                                  if (el) el.indeterminate = partiallySelected;
-                                }}
-                                onChange={() => toggleGradeForms(group.forms)}
-                              />
-                            </span>
-                          </label>
-                          <div className="flex flex-col gap-1.5">
-                            {group.forms.map((f) => (
-                              <button
-                                key={f}
-                                onClick={() => toggleForm(f)}
-                                className={`${allowedForms.has(f) ? "bg-emerald-600 text-white shadow" : "bg-neutral-700 text-neutral-300"} min-h-8 rounded-md px-2 py-1 text-xs font-semibold transition-colors`}
-                              >
-                                {f}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-              </div>
-
-              {/* Action Column */}
-              <div className="flex h-auto justify-end">
-                <button
-                  onClick={() => doGenerate()}
-                  aria-disabled={!canContinue}
-                  disabled={!canContinue}
-                  className={`${canContinue ? "bg-blue-600 hover:bg-blue-700 active:scale-95 shadow-blue-900/20" : "bg-blue-950 text-blue-100/50 cursor-not-allowed shadow-none"} w-full transition-transform rounded-xl py-4 font-bold text-lg shadow-lg md:w-72`}
-                >
-                  {I18N[lang].next}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <SetupWorkspace
+          copy={L}
+          title={title}
+          date={dateStr}
+          rotaCode={rotaCodeIn}
+          history={generationHistory}
+          selectedHistoryId={selectedHistoryId}
+          personGroups={personGroups}
+          formGroups={formGroups}
+          allowedForms={allowedForms}
+          summary={generationSummary}
+          canGenerate={canContinue}
+          generateButtonRef={generateButtonRef}
+          onTitleChange={setTitle}
+          onDateChange={setDateStr}
+          onRotaCodeChange={setRotaCodeIn}
+          onHistorySelectionChange={setSelectedHistoryId}
+          onHistoryLoad={loadSelectedHistory}
+          onHistoryClear={clearGenerationHistory}
+          onPersonToggle={togglePerson}
+          onDoubleToggle={toggleDouble}
+          onFormToggle={toggleForm}
+          onGradeToggle={toggleGradeForms}
+          onGenerate={() => doGenerate()}
+        />
       )}
 
       {step === 2 && (
