@@ -1,3 +1,5 @@
+"use client";
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   applyImportedAssignments,
@@ -289,9 +291,15 @@ async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
  * Component
  * ========================= */
 export default function App() {
-  const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("lang") as Lang) || "zh");
+  const [lang, setLang] = useState<Lang>("zh");
+  const currentLanguage = useRef<Lang>("zh");
+  const [clientStateHydrated, setClientStateHydrated] = useState(false);
   const L = I18N[lang];
-  useEffect(() => { localStorage.setItem("lang", lang); }, [lang]);
+
+  function updateLanguage(nextLanguage: Lang) {
+    currentLanguage.current = nextLanguage;
+    setLang(nextLanguage);
+  }
 
   const [loaded, setLoaded] = useState(false);
   const [people, setPeople] = useState<Person[]>([]);
@@ -322,8 +330,28 @@ export default function App() {
   };
 
   useEffect(() => {
-    setGenerationHistory(readGenerationHistoryFrom(() => window.localStorage));
+    try {
+      const storage = window.localStorage;
+      const storedLanguage = storage.getItem("lang");
+      if (storedLanguage === "zh" || storedLanguage === "en") {
+        updateLanguage(storedLanguage);
+      }
+      setGenerationHistory(readGenerationHistoryFrom(() => storage));
+    } catch (error) {
+      console.warn("Could not hydrate local preferences", error);
+    } finally {
+      setClientStateHydrated(true);
+    }
   }, []);
+
+  useEffect(() => {
+    if (!clientStateHydrated) return;
+    try {
+      window.localStorage.setItem("lang", lang);
+    } catch (error) {
+      console.warn("Could not save language preference", error);
+    }
+  }, [clientStateHydrated, lang]);
 
   useEffect(() => {
     if (!shouldPersistGenerationHistory.current) return;
@@ -346,7 +374,7 @@ export default function App() {
       })
       .catch((e) => {
         console.error(e);
-        alert(L.rosterLoadFail);
+        alert(I18N[currentLanguage.current].rosterLoadFail);
       });
   }, []);
 
@@ -789,7 +817,12 @@ export default function App() {
     generationSummary.feasible;
 
   if (!loaded) {
-    return <div className="min-h-screen flex items-center justify-center text-neutral-400">{L.loading}</div>;
+    return (
+      <main className="min-h-screen flex items-center justify-center text-neutral-400">
+        <h1 className="visually-hidden">Gubei Prefect Toolkit</h1>
+        <div>{L.loading}</div>
+      </main>
+    );
   }
 
   return (
@@ -861,7 +894,7 @@ export default function App() {
               <span className="text-sm text-neutral-400 hidden md:inline">{I18N[lang].languageLabel}</span>
               <select
                 value={lang}
-                onChange={(e) => setLang(e.target.value as Lang)}
+                onChange={(e) => updateLanguage(e.target.value as Lang)}
                 className="bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-sm"
               >
                 <option value="zh">{I18N[lang].languageZh}</option>
