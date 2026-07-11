@@ -3,7 +3,6 @@ export type Lang = "zh" | "en";
 const EN_COPY = {
   setup: "Setup",
   result: "Result",
-  setupSubtitle: "Editorial campus duty desk",
   today: "Today",
   announcementBrief: "Announcement brief",
   announcementTitle: "Announcement title",
@@ -103,7 +102,6 @@ export type AppCopy = typeof EN_COPY;
 const ZH_COPY: AppCopy = {
   setup: "准备界面",
   result: "成品界面",
-  setupSubtitle: "校园值勤排布台",
   today: "今日",
   announcementBrief: "公告信息",
   announcementTitle: "公告标题 / Announcement title",

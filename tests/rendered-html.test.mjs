@@ -93,8 +93,9 @@ test("server-renders the rota workspace directly", async () => {
     );
   }
 
-  assert.match(html, /<h1[^>]*>Prefect Rota<\/h1>/i);
+  assert.match(html, /<h1[^>]*>Rota Generator<\/h1>/i);
   assert.equal((html.match(/<h1\b/gi) || []).length, 1);
+  assert.doesNotMatch(html, /Editorial campus duty desk|校园值勤排布台/i);
   assert.doesNotMatch(html, /landing page|learn more|codex-preview|cdn\.tailwindcss\.com/i);
 
   const assetDirectory = new URL("../dist/client/assets/", import.meta.url);
@@ -110,19 +111,38 @@ test("server-renders the rota workspace directly", async () => {
   assert.match(sourceCss, /@media \(min-width: 1180px\)[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\) 328px/);
   assert.match(
     sourceCss,
-    /grid-template-areas:\s*\n\s*"brief restore"\s*\n\s*"selection rail"/,
+    /grid-template-areas:\s*\n\s*"brief rail"\s*\n\s*"selection rail"\s*\n\s*"restore restore"/,
   );
   assert.match(sourceCss, /\.restore-sheet\s*\{\s*grid-area:\s*restore;/);
   assert.match(sourceCss, /\.setup-main\s*\{\s*display:\s*contents;/);
   assert.match(sourceCss, /\.setup-rail\s*\{[\s\S]*?grid-area:\s*rail;/);
   assert.match(
     sourceCss,
-    /@media \(min-width: 880px\)[\s\S]*grid-template-areas:\s*\n\s*"brief brief"\s*\n\s*"selection selection"\s*\n\s*"restore rail"/,
+    /@media \(min-width: 880px\)[\s\S]*grid-template-areas:\s*\n\s*"brief brief"\s*\n\s*"selection selection"\s*\n\s*"rail rail"\s*\n\s*"restore restore"/,
+  );
+  assert.match(sourceCss, /grid-template-areas:\s*\n\s*"brief"\s*\n\s*"selection"\s*\n\s*"rail"\s*\n\s*"restore"/);
+
+  const mobileStart = sourceCss.indexOf("@media (max-width: 720px)");
+  const mobileEnd = sourceCss.indexOf("@media (prefers-reduced-motion", mobileStart);
+  assert.ok(mobileStart >= 0 && mobileEnd > mobileStart);
+  const mobileCss = sourceCss.slice(mobileStart, mobileEnd);
+  assert.match(mobileCss, /\.people-sheet\s*\{[\s\S]*?padding:\s*18px;/);
+  assert.match(mobileCss, /\.people-sheet \.prefect-groups\s*\{[\s\S]*?gap:\s*8px;/);
+  assert.match(mobileCss, /\.people-sheet \.prefect-group\s*\{[\s\S]*?padding-top:\s*7px;/);
+  assert.match(mobileCss, /\.people-sheet \.prefect-list\s*\{[\s\S]*?margin-top:\s*2px;/);
+  assert.match(
+    mobileCss,
+    /\.prefect-row\s*\{[\s\S]*?align-items:\s*center;[\s\S]*?flex-direction:\s*row;[\s\S]*?gap:\s*8px;[\s\S]*?padding:\s*2px 0;/,
   );
   assert.match(
-    sourceCss,
-    /@media \(max-width: 720px\)[\s\S]*\.prefect-choice,\s*\n\s*\.double-choice,\s*\n\s*\.grade-group__heading label\s*\{[\s\S]*?min-height:\s*44px;/,
+    mobileCss,
+    /\.prefect-choice\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?flex:\s*1 1 auto;[\s\S]*?width:\s*auto;/,
   );
+  assert.match(
+    mobileCss,
+    /\.double-choice\s*\{[\s\S]*?flex:\s*0 0 auto;[\s\S]*?width:\s*auto;[\s\S]*?justify-content:\s*flex-end;[\s\S]*?white-space:\s*nowrap;/,
+  );
+  assert.doesNotMatch(mobileCss, /\.prefect-row\s*\{[^}]*flex-direction:\s*column;/);
 
   const socialImage = await readFile(new URL("../dist/client/og.png", import.meta.url));
   assert.deepEqual(

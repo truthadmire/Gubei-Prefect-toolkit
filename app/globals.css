@@ -118,12 +118,6 @@ button:disabled {
   line-height: 0.94;
 }
 
-.masthead__identity > p {
-  margin: 8px 0 0;
-  color: var(--muted-ink);
-  font-size: 0.94rem;
-}
-
 .masthead__tools {
   display: flex;
   align-items: flex-end;
@@ -186,9 +180,9 @@ button:disabled {
   grid-template-columns: minmax(0, 1fr);
   grid-template-areas:
     "brief"
-    "restore"
     "selection"
-    "rail";
+    "rail"
+    "restore";
 }
 
 .setup-layout > * {
@@ -893,7 +887,8 @@ button.result-slot[aria-pressed="true"] {
     grid-template-areas:
       "brief brief"
       "selection selection"
-      "restore rail";
+      "rail rail"
+      "restore restore";
     align-items: start;
   }
 
@@ -918,8 +913,9 @@ button.result-slot[aria-pressed="true"] {
   .setup-layout {
     grid-template-columns: minmax(0, 1fr) 328px;
     grid-template-areas:
-      "brief restore"
-      "selection rail";
+      "brief rail"
+      "selection rail"
+      "restore restore";
     align-items: start;
   }
 
@@ -954,6 +950,22 @@ button.result-slot[aria-pressed="true"] {
     padding: 22px;
   }
 
+  .people-sheet {
+    padding: 18px;
+  }
+
+  .people-sheet .prefect-groups {
+    gap: 8px;
+  }
+
+  .people-sheet .prefect-group {
+    padding-top: 7px;
+  }
+
+  .people-sheet .prefect-list {
+    margin-top: 2px;
+  }
+
   button,
   input,
   select,
@@ -972,9 +984,10 @@ button.result-slot[aria-pressed="true"] {
   }
 
   .prefect-row {
-    align-items: flex-start;
-    flex-direction: column;
-    padding: 9px 0;
+    align-items: center;
+    flex-direction: row;
+    gap: 8px;
+    padding: 2px 0;
   }
 
   .prefect-choice,
@@ -983,18 +996,24 @@ button.result-slot[aria-pressed="true"] {
     min-height: 44px;
   }
 
-  .prefect-choice,
-  .double-choice {
-    width: 100%;
+  .prefect-choice {
+    min-width: 0;
+    flex: 1 1 auto;
+    width: auto;
   }
 
   .prefect-choice > span:last-child {
     min-width: 0;
-    overflow-wrap: anywhere;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .double-choice {
-    justify-content: space-between;
+    flex: 0 0 auto;
+    width: auto;
+    justify-content: flex-end;
+    white-space: nowrap;
   }
 
   .grade-group__heading {

@@ -74,10 +74,11 @@ describe("App editorial setup workspace", () => {
     delete mutableNavigator.clipboard;
   });
 
-  it("opens directly to the labeled Prefect Rota workspace", async () => {
+  it("opens directly to the labeled Rota Generator workspace", async () => {
     await renderReady();
 
-    expect(screen.getByRole("heading", { level: 1, name: "Prefect Rota" })).toBeVisible();
+    expect(screen.getByRole("heading", { level: 1, name: "Rota Generator" })).toBeVisible();
+    expect(screen.queryByText("Editorial campus duty desk")).not.toBeInTheDocument();
     expect(screen.getByText("Announcement title")).toBeVisible();
     expect(screen.getByLabelText("Announcement title")).toBeVisible();
     expect(screen.getByText("Announcement date")).toBeVisible();
@@ -90,11 +91,11 @@ describe("App editorial setup workspace", () => {
 
     const orderedSteps = [
       screen.getByRole("heading", { name: "Announcement brief" }),
-      screen.getByRole("heading", { name: "Previous work" }),
       screen.getByRole("heading", { name: "Prefects" }),
       screen.getByRole("heading", { name: "Forms" }),
       screen.getByRole("heading", { name: "Live summary" }),
       screen.getByRole("button", { name: "Generate rota" }),
+      screen.getByRole("heading", { name: "Previous work" }),
     ];
 
     for (let index = 0; index < orderedSteps.length - 1; index += 1) {

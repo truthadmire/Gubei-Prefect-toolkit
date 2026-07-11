@@ -88,50 +88,8 @@ export default function SetupWorkspace({
             </div>
           </section>
 
-          <section className="sheet restore-sheet" aria-labelledby="restore-heading">
-            <p className="sheet-kicker">02 / Restore</p>
-            <h2 id="restore-heading">{copy.restoreTitle}</h2>
-            <label className="field" htmlFor="previous-rota-code">
-              <span>{copy.previousCodeLabel}</span>
-              <input
-                id="previous-rota-code"
-                className="mono-input"
-                aria-label={copy.previousCodeLabel}
-                value={rotaCode}
-                placeholder={copy.lastCodePh}
-                onChange={(event) => onRotaCodeChange(event.target.value)}
-              />
-              <small>{copy.previousCodeHint}</small>
-            </label>
-            {history.length > 0 && (
-              <div className="history-controls">
-                <label className="field" htmlFor="history-select">
-                  <span>{copy.historyTitle}</span>
-                  <select
-                    id="history-select"
-                    aria-label={copy.historySelect}
-                    value={selectedHistoryId}
-                    onChange={(event) => onHistorySelectionChange(event.target.value)}
-                  >
-                    {history.map((item) => (
-                      <option key={item.id} value={item.id}>{formatHistoryLabel(item)}</option>
-                    ))}
-                  </select>
-                </label>
-                <div className="history-actions">
-                  <button type="button" className="button button--secondary" disabled={!selectedHistoryId} onClick={onHistoryLoad}>
-                    {copy.historyUse}
-                  </button>
-                  <button type="button" className="button button--quiet" onClick={onHistoryClear}>
-                    {copy.historyClear}
-                  </button>
-                </div>
-              </div>
-            )}
-          </section>
-
           <div className="selection-grid">
-            <section className="sheet selection-sheet" aria-labelledby="prefects-heading">
+            <section className="sheet selection-sheet people-sheet" aria-labelledby="prefects-heading">
               <p className="sheet-kicker">03 / People</p>
               <h2 id="prefects-heading">{copy.peopleSel}</h2>
               <p className="section-hint">{copy.peopleHint}</p>
@@ -257,6 +215,48 @@ export default function SetupWorkspace({
             {copy.generate}
           </button>
         </aside>
+
+        <section className="sheet restore-sheet" aria-labelledby="restore-heading">
+          <p className="sheet-kicker">02 / Restore</p>
+          <h2 id="restore-heading">{copy.restoreTitle}</h2>
+          <label className="field" htmlFor="previous-rota-code">
+            <span>{copy.previousCodeLabel}</span>
+            <input
+              id="previous-rota-code"
+              className="mono-input"
+              aria-label={copy.previousCodeLabel}
+              value={rotaCode}
+              placeholder={copy.lastCodePh}
+              onChange={(event) => onRotaCodeChange(event.target.value)}
+            />
+            <small>{copy.previousCodeHint}</small>
+          </label>
+          {history.length > 0 && (
+            <div className="history-controls">
+              <label className="field" htmlFor="history-select">
+                <span>{copy.historyTitle}</span>
+                <select
+                  id="history-select"
+                  aria-label={copy.historySelect}
+                  value={selectedHistoryId}
+                  onChange={(event) => onHistorySelectionChange(event.target.value)}
+                >
+                  {history.map((item) => (
+                    <option key={item.id} value={item.id}>{formatHistoryLabel(item)}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="history-actions">
+                <button type="button" className="button button--secondary" disabled={!selectedHistoryId} onClick={onHistoryLoad}>
+                  {copy.historyUse}
+                </button>
+                <button type="button" className="button button--quiet" onClick={onHistoryClear}>
+                  {copy.historyClear}
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
       </div>
     </main>
   );

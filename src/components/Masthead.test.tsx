@@ -30,4 +30,11 @@ describe("Masthead Shanghai date", () => {
     unmount();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("uses the requested product title without the legacy subtitle", () => {
+    render(<Masthead copy={I18N.zh} lang="zh" onLanguageChange={() => undefined} />);
+
+    expect(screen.getByRole("heading", { level: 1, name: "Rota Generator" })).toBeVisible();
+    expect(screen.queryByText("校园值勤排布台")).not.toBeInTheDocument();
+  });
 });

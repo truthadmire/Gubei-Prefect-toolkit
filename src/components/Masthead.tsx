@@ -49,8 +49,7 @@ export default function Masthead({ copy, lang, onLanguageChange }: MastheadProps
     <header className="masthead">
       <div className="masthead__identity">
         <div className="masthead__brand">SUIS Gubei</div>
-        <h1>Prefect Rota</h1>
-        <p>{copy.setupSubtitle}</p>
+        <h1>Rota Generator</h1>
       </div>
       <div className="masthead__tools">
         <div className="masthead__date">
