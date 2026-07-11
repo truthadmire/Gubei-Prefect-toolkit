@@ -140,3 +140,6 @@ vite.config.ts.timestamp-*
 
 # Superpowers visual brainstorming sessions
 .superpowers/
+
+# Isolated implementation worktrees
+.worktrees/
