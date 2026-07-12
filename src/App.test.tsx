@@ -72,6 +72,9 @@ describe("App editorial setup workspace", () => {
     delete mutableNavigator.canShare;
     delete mutableNavigator.share;
     delete mutableNavigator.clipboard;
+    const mutableUrl = URL as unknown as Record<string, unknown>;
+    delete mutableUrl.createObjectURL;
+    delete mutableUrl.revokeObjectURL;
   });
 
   it("opens directly to the labeled Rota Generator workspace", async () => {
@@ -103,6 +106,27 @@ describe("App editorial setup workspace", () => {
         orderedSteps[index].compareDocumentPosition(orderedSteps[index + 1]) & Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
     }
+  });
+
+  it("downloads the generated workbook with the .xlsx extension", async () => {
+    const downloadedNames: string[] = [];
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: vi.fn(() => "blob:rota-workbook"),
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: vi.fn(() => undefined),
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function captureDownload(this: HTMLAnchorElement) {
+      downloadedNames.push(this.download);
+    });
+    const user = await generateResult();
+
+    await user.click(screen.getByRole("button", { name: "Download Excel" }));
+
+    expect(downloadedNames).toHaveLength(1);
+    expect(downloadedNames[0]).toMatch(/\.xlsx$/);
   });
 
   it("disables generation and shows double-duty counts when staffing is impossible", async () => {

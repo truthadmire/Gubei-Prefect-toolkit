@@ -637,7 +637,7 @@ export default function App() {
         roomHeader: I18N[lang].colFormRoom,
         nameHeader,
       });
-      downloadBlob(excelExportBlob, `${exportFileBase}.xls`);
+      downloadBlob(excelExportBlob, `${exportFileBase}.xlsx`);
       showToast(L.excelOk);
     } catch (error) {
       console.error(error);

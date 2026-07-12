@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { strFromU8, unzipSync } from "fflate";
 import type { ResultRow } from "../types";
 import {
   buildBoardExportKey,
@@ -33,12 +34,34 @@ const excelOptions = {
   nameHeader: "Name <Department>",
 };
 
-describe("SpreadsheetML exports", () => {
-  it("uses the Excel MIME type and escapes every user-facing field", async () => {
+async function unzipWorkbook(blob: Blob) {
+  return unzipSync(new Uint8Array(await blob.arrayBuffer()));
+}
+
+describe("OOXML workbook exports", () => {
+  it("creates a genuine .xlsx ZIP package with the required workbook parts", async () => {
     const blob = buildExcelBlob([resultRow()], excelOptions);
 
-    expect(blob.type).toBe("application/vnd.ms-excel;charset=utf-8");
-    const xml = await blob.text();
+    expect(blob.type).toBe("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    expect(Array.from(new Uint8Array(await blob.slice(0, 4).arrayBuffer()))).toEqual([0x50, 0x4b, 0x03, 0x04]);
+
+    const archive = await unzipWorkbook(blob);
+    expect(Object.keys(archive).sort()).toEqual(expect.arrayContaining([
+      "[Content_Types].xml",
+      "_rels/.rels",
+      "docProps/app.xml",
+      "docProps/core.xml",
+      "xl/_rels/workbook.xml.rels",
+      "xl/styles.xml",
+      "xl/workbook.xml",
+      "xl/worksheets/sheet1.xml",
+    ]));
+  });
+
+  it("escapes every user-facing field inside the worksheet", async () => {
+    const archive = await unzipWorkbook(buildExcelBlob([resultRow()], excelOptions));
+    const xml = strFromU8(archive["xl/worksheets/sheet1.xml"]);
+
     expect(xml).toContain("Morning &amp; &lt;Assembly&gt;");
     expect(xml).toContain("2026-07-11 &amp; onward");
     expect(xml).toContain("Date &lt;published&gt;");
@@ -49,9 +72,10 @@ describe("SpreadsheetML exports", () => {
   });
 
   it("renders an empty assignment as a visible dash", async () => {
-    const xml = await buildExcelBlob([resultRow({ personName: "" })], excelOptions).text();
+    const archive = await unzipWorkbook(buildExcelBlob([resultRow({ personName: "" })], excelOptions));
+    const xml = strFromU8(archive["xl/worksheets/sheet1.xml"]);
 
-    expect(xml).toContain('<Data ss:Type="String">-</Data>');
+    expect(xml).toContain(">-</t>");
   });
 
   it("preserves result-row order", async () => {
@@ -64,7 +88,8 @@ describe("SpreadsheetML exports", () => {
       }),
     ];
 
-    const xml = await buildExcelBlob(rows, excelOptions).text();
+    const archive = await unzipWorkbook(buildExcelBlob(rows, excelOptions));
+    const xml = strFromU8(archive["xl/worksheets/sheet1.xml"]);
     expect(xml.indexOf("FIRST-ROOM")).toBeLessThan(xml.indexOf("SECOND-ROOM"));
     expect(xml.indexOf("First person")).toBeLessThan(xml.indexOf("Second person"));
   });

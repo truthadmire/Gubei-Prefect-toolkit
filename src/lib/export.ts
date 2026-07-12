@@ -1,5 +1,6 @@
 import type { Lang } from "../i18n";
 import type { ResultRow } from "../types";
+import { strToU8, zipSync } from "fflate";
 
 export type ExcelExportOptions = {
   title: string;
@@ -66,72 +67,144 @@ export function downloadBlob(blob: Blob, filename: string): void {
 }
 
 export function buildExcelBlob(rows: ResultRow[], options: ExcelExportOptions): Blob {
-  const styleMap = new Map<string, string>();
+  const styleMap = new Map<string, number>();
   for (const row of rows) {
     if (!row.personName) continue;
     const key = `${excelColor(row.style.bg)}|${excelColor(row.style.fg)}`;
-    if (!styleMap.has(key)) styleMap.set(key, `person${styleMap.size}`);
+    if (!styleMap.has(key)) styleMap.set(key, 6 + styleMap.size);
   }
 
-  const borderXml = `
-      <Borders>
-        <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#CBD5E1"/>
-        <Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#CBD5E1"/>
-        <Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#CBD5E1"/>
-        <Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#CBD5E1"/>
-      </Borders>`;
-  const personStyles = Array.from(styleMap.entries()).map(([key, id]) => {
-    const [bg, fg] = key.split("|");
-    return `
-        <Style ss:ID="${id}">
-          <Font ss:Bold="1" ss:Color="${fg}"/>
-          <Interior ss:Color="${bg}" ss:Pattern="Solid"/>
-          <Alignment ss:Vertical="Center"/>
-          ${borderXml}
-        </Style>`;
+  const personStyleEntries = Array.from(styleMap.keys());
+  const personFonts = personStyleEntries.map((key) => {
+    const [, fg] = key.split("|");
+    return `<font><b/><sz val="11"/><color rgb="FF${fg.slice(1)}"/><name val="Arial"/><family val="2"/></font>`;
   }).join("");
+  const personFills = personStyleEntries.map((key) => {
+    const [bg] = key.split("|");
+    return `<fill><patternFill patternType="solid"><fgColor rgb="FF${bg.slice(1)}"/><bgColor indexed="64"/></patternFill></fill>`;
+  }).join("");
+  const personXfs = personStyleEntries.map((_, index) => (
+    `<xf numFmtId="0" fontId="${6 + index}" fillId="${5 + index}" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>`
+  )).join("");
 
-  const rowsXml = rows.map((row) => {
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="${6 + personStyleEntries.length}">
+    <font><sz val="11"/><name val="Arial"/><family val="2"/></font>
+    <font><b/><sz val="16"/><name val="Arial"/><family val="2"/></font>
+    <font><b/><sz val="11"/><color rgb="FF475569"/><name val="Arial"/><family val="2"/></font>
+    <font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Arial"/><family val="2"/></font>
+    <font><b/><sz val="11"/><color rgb="FF0F172A"/><name val="Arial"/><family val="2"/></font>
+    <font><b/><sz val="11"/><color rgb="FF94A3B8"/><name val="Arial"/><family val="2"/></font>
+    ${personFonts}
+  </fonts>
+  <fills count="${5 + personStyleEntries.length}">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FF0F172A"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFE2E8F0"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFF8FAFC"/><bgColor indexed="64"/></patternFill></fill>
+    ${personFills}
+  </fills>
+  <borders count="2">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+    <border>
+      <left style="thin"><color rgb="FFCBD5E1"/></left>
+      <right style="thin"><color rgb="FFCBD5E1"/></right>
+      <top style="thin"><color rgb="FFCBD5E1"/></top>
+      <bottom style="thin"><color rgb="FFCBD5E1"/></bottom>
+      <diagonal/>
+    </border>
+  </borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="${6 + personStyleEntries.length}">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment vertical="center"/></xf>
+    <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+    <xf numFmtId="0" fontId="3" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+    <xf numFmtId="0" fontId="4" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+    <xf numFmtId="0" fontId="5" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+    ${personXfs}
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>`;
+
+  const inlineStringCell = (reference: string, value: string, styleId = 0) => (
+    `<c r="${reference}"${styleId ? ` s="${styleId}"` : ""} t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`
+  );
+  const rowsXml = rows.map((row, index) => {
     const styleKey = `${excelColor(row.style.bg)}|${excelColor(row.style.fg)}`;
-    const personStyle = row.personName ? styleMap.get(styleKey) || "empty" : "empty";
-    return `
-        <Row ss:Height="28">
-          <Cell ss:StyleID="room"><Data ss:Type="String">${xmlEscape(row.formRoom)}</Data></Cell>
-          <Cell ss:StyleID="${personStyle}"><Data ss:Type="String">${xmlEscape(row.personName || "-")}</Data></Cell>
-        </Row>`;
+    const personStyle = row.personName ? styleMap.get(styleKey) ?? 5 : 5;
+    const rowNumber = index + 5;
+    return `<row r="${rowNumber}" ht="28" customHeight="1">${inlineStringCell(`A${rowNumber}`, row.formRoom, 4)}${inlineStringCell(`B${rowNumber}`, row.personName || "-", personStyle)}</row>`;
   }).join("");
 
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<?mso-application progid="Excel.Sheet"?>
-<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
-  xmlns:o="urn:schemas-microsoft-com:office:office"
-  xmlns:x="urn:schemas-microsoft-com:office:excel"
-  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
-  <Styles>
-    <Style ss:ID="title"><Font ss:Bold="1" ss:Size="16"/><Alignment ss:Vertical="Center"/></Style>
-    <Style ss:ID="meta"><Font ss:Bold="1" ss:Color="#475569"/></Style>
-    <Style ss:ID="header"><Font ss:Bold="1" ss:Color="#FFFFFF"/><Interior ss:Color="#0F172A" ss:Pattern="Solid"/><Alignment ss:Vertical="Center"/>${borderXml}</Style>
-    <Style ss:ID="room"><Font ss:Bold="1" ss:Color="#0F172A"/><Interior ss:Color="#E2E8F0" ss:Pattern="Solid"/><Alignment ss:Vertical="Center"/>${borderXml}</Style>
-    <Style ss:ID="empty"><Font ss:Bold="1" ss:Color="#94A3B8"/><Interior ss:Color="#F8FAFC" ss:Pattern="Solid"/><Alignment ss:Vertical="Center"/>${borderXml}</Style>
-    ${personStyles}
-  </Styles>
-  <Worksheet ss:Name="Rota">
-    <Table>
-      <Column ss:Width="140"/>
-      <Column ss:Width="220"/>
-      <Row ss:Height="26"><Cell ss:StyleID="title" ss:MergeAcross="1"><Data ss:Type="String">${xmlEscape(options.title)}</Data></Cell></Row>
-      <Row><Cell ss:StyleID="meta"><Data ss:Type="String">${xmlEscape(options.dateLabel)}</Data></Cell><Cell><Data ss:Type="String">${xmlEscape(options.dateStr)}</Data></Cell></Row>
-      <Row/>
-      <Row ss:Height="24">
-        <Cell ss:StyleID="header"><Data ss:Type="String">${xmlEscape(options.roomHeader)}</Data></Cell>
-        <Cell ss:StyleID="header"><Data ss:Type="String">${xmlEscape(options.nameHeader)}</Data></Cell>
-      </Row>
-      ${rowsXml}
-    </Table>
-  </Worksheet>
-</Workbook>`;
+  const lastRow = Math.max(4, rows.length + 4);
+  const worksheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:B${lastRow}"/>
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="4" topLeftCell="A5" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <sheetFormatPr defaultRowHeight="15"/>
+  <cols><col min="1" max="1" width="22" customWidth="1"/><col min="2" max="2" width="34" customWidth="1"/></cols>
+  <sheetData>
+    <row r="1" ht="26" customHeight="1">${inlineStringCell("A1", options.title, 1)}</row>
+    <row r="2">${inlineStringCell("A2", options.dateLabel, 2)}${inlineStringCell("B2", options.dateStr)}</row>
+    <row r="3"/>
+    <row r="4" ht="24" customHeight="1">${inlineStringCell("A4", options.roomHeader, 3)}${inlineStringCell("B4", options.nameHeader, 3)}</row>
+    ${rowsXml}
+  </sheetData>
+  <mergeCells count="1"><mergeCell ref="A1:B1"/></mergeCells>
+  <pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>
+</worksheet>`;
 
-  return new Blob([xml], { type: "application/vnd.ms-excel;charset=utf-8" });
+  const files: Record<string, Uint8Array> = {
+    "[Content_Types].xml": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>`),
+    "_rels/.rels": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>`),
+    "docProps/app.xml": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>Gubei Prefect Toolkit</Application>
+  <DocSecurity>0</DocSecurity>
+  <ScaleCrop>false</ScaleCrop>
+  <HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>1</vt:i4></vt:variant></vt:vector></HeadingPairs>
+  <TitlesOfParts><vt:vector size="1" baseType="lpstr"><vt:lpstr>Rota</vt:lpstr></vt:vector></TitlesOfParts>
+</Properties>`),
+    "docProps/core.xml": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:title>${xmlEscape(options.title)}</dc:title>
+  <dc:creator>Gubei Prefect Toolkit</dc:creator>
+</cp:coreProperties>`),
+    "xl/workbook.xml": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <bookViews><workbookView xWindow="0" yWindow="0" windowWidth="16384" windowHeight="8192"/></bookViews>
+  <sheets><sheet name="Rota" sheetId="1" r:id="rId1"/></sheets>
+  <calcPr calcId="0"/>
+</workbook>`),
+    "xl/_rels/workbook.xml.rels": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`),
+    "xl/styles.xml": strToU8(stylesXml),
+    "xl/worksheets/sheet1.xml": strToU8(worksheetXml),
+  };
+  const archive = zipSync(files, { level: 6 });
+  return new Blob([archive], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
 }
 
 export function buildBoardExportKey(
