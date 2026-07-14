@@ -16,9 +16,11 @@ describe("Vercel deployment contract", () => {
     const config = JSON.parse(readFileSync(configPath, "utf8")) as {
       framework?: string;
       buildCommand?: string;
+      outputDirectory?: string;
     };
 
     expect(config.framework).toBe("nextjs");
     expect(config.buildCommand).toBe("next build");
+    expect(config.outputDirectory).toBe(".next");
   });
 });
