@@ -12,6 +12,7 @@ export type ResultWorkspaceProps = {
   rowsByGrade: Array<{ grade: number; rows: ResultRow[] }>;
   selectedSwapRoomId: string | null;
   generatedCode: string;
+  exportBusy: "jpg" | "share" | "excel" | null;
   boardRef: RefObject<HTMLDivElement | null>;
   labels: {
     back: string;
@@ -48,6 +49,7 @@ export default function ResultWorkspace({
   rowsByGrade,
   selectedSwapRoomId,
   generatedCode,
+  exportBusy,
   boardRef,
   labels,
   onActivateRoom,
@@ -189,11 +191,11 @@ export default function ResultWorkspace({
         </div>
       </div>
 
-      <section className="result-actions" aria-label={actionsLabel}>
+      <section className="result-actions" aria-label={actionsLabel} aria-busy={exportBusy !== null}>
         <button type="button" className="button button--secondary" onClick={onBack}>{labels.back}</button>
-        <button type="button" className="button button--primary" onClick={onDownloadJpg}>{labels.downloadJpg}</button>
-        <button type="button" className="button button--secondary" onClick={onShare}>{labels.share}</button>
-        <button type="button" className="button button--secondary" onClick={onDownloadExcel}>{labels.downloadExcel}</button>
+        <button type="button" className="button button--primary" disabled={exportBusy !== null} aria-disabled={exportBusy !== null} onClick={onDownloadJpg}>{labels.downloadJpg}</button>
+        <button type="button" className="button button--secondary" disabled={exportBusy !== null} aria-disabled={exportBusy !== null} onClick={onShare}>{labels.share}</button>
+        <button type="button" className="button button--secondary" disabled={exportBusy !== null} aria-disabled={exportBusy !== null} onClick={onDownloadExcel}>{labels.downloadExcel}</button>
       </section>
 
       <section className="result-code sheet" aria-labelledby="result-code-title">

@@ -27,6 +27,25 @@ const metaContent = (html, selector, value) => {
   return undefined;
 };
 
+const jpegDimensions = (buffer) => {
+  let offset = 2;
+  while (offset + 8 < buffer.length) {
+    if (buffer[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = buffer[offset + 1];
+    offset += 2;
+    if (marker === 0xd8 || marker === 0xd9) continue;
+    const length = buffer.readUInt16BE(offset);
+    if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
+      return { height: buffer.readUInt16BE(offset + 3), width: buffer.readUInt16BE(offset + 5) };
+    }
+    offset += length;
+  }
+  throw new Error("JPEG dimensions not found");
+};
+
 test("server-renders the rota workspace directly", async () => {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", String(Date.now()));
@@ -50,30 +69,30 @@ test("server-renders the rota workspace directly", async () => {
     "Build balanced SUIS Gubei prefect room rotas quickly.",
   );
   assert.equal(metaContent(html, "property", "og:type"), "website");
-  assert.equal(metaContent(html, "property", "og:image"), "http://localhost/og.png");
+  assert.equal(metaContent(html, "property", "og:image"), "http://localhost/og.jpg");
   assert.equal(metaContent(html, "name", "twitter:card"), "summary_large_image");
   assert.equal(metaContent(html, "name", "twitter:title"), "Gubei Prefect Toolkit");
   assert.equal(
     metaContent(html, "name", "twitter:description"),
     "Build balanced SUIS Gubei prefect room rotas quickly.",
   );
-  assert.equal(metaContent(html, "name", "twitter:image"), "http://localhost/og.png");
+  assert.equal(metaContent(html, "name", "twitter:image"), "http://localhost/og.jpg");
 
   const authorityCases = [
     {
       label: "malformed forwarded authority",
       headers: { host: "safe.example", "x-forwarded-host": "bad host" },
-      image: "https://safe.example/og.png",
+      image: "https://safe.example/og.jpg",
     },
     {
       label: "userinfo-bearing forwarded authority",
       headers: { host: "safe.example:8443", "x-forwarded-host": "victim.example@evil.example" },
-      image: "https://safe.example:8443/og.png",
+      image: "https://safe.example:8443/og.jpg",
     },
     {
       label: "bracketed IPv6 loopback with port",
       headers: { host: "[::1]:8787" },
-      image: "http://[::1]:8787/og.png",
+      image: "http://[::1]:8787/og.jpg",
     },
   ];
   for (const authorityCase of authorityCases) {
@@ -144,15 +163,9 @@ test("server-renders the rota workspace directly", async () => {
   );
   assert.doesNotMatch(mobileCss, /\.prefect-row\s*\{[^}]*flex-direction:\s*column;/);
 
-  const socialImage = await readFile(new URL("../dist/client/og.png", import.meta.url));
-  assert.deepEqual(
-    [...socialImage.subarray(0, 8)],
-    [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
-  );
-  assert.equal(socialImage.subarray(12, 16).toString("ascii"), "IHDR");
-  const socialImageWidth = socialImage.readUInt32BE(16);
-  const socialImageHeight = socialImage.readUInt32BE(20);
-  assert.ok(socialImageWidth > 0);
-  assert.ok(socialImageHeight > 0);
-  assert.ok(Math.abs(socialImageWidth / socialImageHeight - 1200 / 630) < 0.05);
+  const socialImage = await readFile(new URL("../dist/client/og.jpg", import.meta.url));
+  assert.deepEqual([...socialImage.subarray(0, 3)], [0xff, 0xd8, 0xff]);
+  assert.ok(socialImage.byteLength <= 250_000);
+  const dimensions = jpegDimensions(socialImage);
+  assert.deepEqual(dimensions, { width: 1200, height: 630 });
 });

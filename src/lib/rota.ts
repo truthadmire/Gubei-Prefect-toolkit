@@ -1,5 +1,5 @@
 import Munkres from "munkres-js";
-import type { Assignment, Person, Room, Slot } from "../types";
+import type { Assignment, Person, Room } from "../types";
 
 type RotaPayload = {
   date?: string;
@@ -155,70 +155,10 @@ export async function unpackRotaCodeCompat(code: string) {
   throw new Error("This browser cannot decode old v1 compressed code.");
 }
 
-function makeCost(
-  p: Person,
-  slot: Slot,
-  strong: boolean,
-  randJitter: (() => number) | null
-): number {
-  const last = new Set(p.lastRooms || []);
-  if (strong) {
-    for (const r of slot.rooms) if (last.has(r)) return 1e6;
-    if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) return 1e6;
-  }
-
-  let c = 0;
-  for (const r of slot.rooms) if (last.has(r)) c += 100;
-  if (slot.rooms.length === 2 && p.lastPairKey === pairKey(slot.rooms[0], slot.rooms[1])) c += 200;
-  c += p.assignedCount * 5;
-
-  if (randJitter) c += Math.floor(randJitter() * 2);
-  return c;
-}
-
-function greedyAdjacentPairs(rooms: Room[], need: number, used: Set<string>): Slot[] {
-  const sorted = rooms.slice().sort((a, b) =>
-    a.building === b.building
-      ? a.floor === b.floor
-        ? a.number - b.number
-        : a.floor - b.floor
-      : a.building.localeCompare(b.building)
-  );
-  const pairs: Slot[] = [];
-  for (let i = 0; i < sorted.length - 1 && pairs.length < need; i++) {
-    const a = sorted[i], b = sorted[i + 1];
-    if (used.has(a.id) || used.has(b.id)) continue;
-    if (a.building === b.building && a.floor === b.floor && Math.abs(a.number - b.number) === 1) {
-      pairs.push({ id: pairKey(a.id, b.id), rooms: [a.id, b.id] });
-      used.add(a.id); used.add(b.id);
-    }
-  }
-  return pairs;
-}
-
 function distance(a: Room, b: Room): number {
   if (a.building !== b.building) return 1e9 + Math.abs(a.number - b.number);
   const floorPenalty = Math.abs(a.floor - b.floor) * 1000;
   return floorPenalty + Math.abs(a.number - b.number);
-}
-
-function fillPairsByNearest(rooms: Room[], need: number, used: Set<string>): Slot[] {
-  const candidates: { a: Room; b: Room; d: number }[] = [];
-  const free = rooms.filter((r) => !used.has(r.id));
-  for (let i = 0; i < free.length; i++) {
-    for (let j = i + 1; j < free.length; j++) {
-      candidates.push({ a: free[i], b: free[j], d: distance(free[i], free[j]) });
-    }
-  }
-  candidates.sort((x, y) => x.d - y.d);
-  const picked: Slot[] = [];
-  for (const c of candidates) {
-    if (picked.length >= need) break;
-    if (used.has(c.a.id) || used.has(c.b.id)) continue;
-    picked.push({ id: pairKey(c.a.id, c.b.id), rooms: [c.a.id, c.b.id] });
-    used.add(c.a.id); used.add(c.b.id);
-  }
-  return picked;
 }
 
 export function isHepburnGrade12Blocked(p: Person, roomIds: string[], roomById: Map<string, Room>): boolean {
@@ -231,36 +171,157 @@ function isPersonEligibleForRooms(p: Person, roomIds: string[], roomById: Map<st
     !isHepburnGrade12Blocked(p, roomIds, roomById);
 }
 
-function hungarianAssign(
-  people: Person[],
-  slots: Slot[],
-  randJitter: (() => number) | null,
-  roomById: Map<string, Room>
+type CapacitySeat = { person: Person; secondary: boolean };
+
+const INVALID_COST = 1_000_000_000_000;
+const SECONDARY_SEAT_COST = 100_000_000;
+const PREVIOUS_ROOM_COST = 1_000_000;
+const PREVIOUS_PAIR_COMPONENT_COST = 100_000;
+
+function seatRoomCost(seat: CapacitySeat, room: Room, randJitter: (() => number) | null): number {
+  if (seat.person.name.trim().toLowerCase() === "hepburn he" && room.form?.startsWith("12")) return INVALID_COST;
+
+  const previousRooms = new Set(seat.person.lastRooms || []);
+  const previousPairRooms = new Set(seat.person.lastPairKey?.split("+") || []);
+  const loadCost = Math.min(Math.max(0, seat.person.assignedCount), 10_000) * 10;
+  const historyCost = previousRooms.has(room.id) ? PREVIOUS_ROOM_COST : 0;
+  const pairComponentCost = seat.secondary && previousPairRooms.has(room.id)
+    ? PREVIOUS_PAIR_COMPONENT_COST
+    : 0;
+  const jitter = randJitter ? Math.floor(randJitter() * 100) : 0;
+
+  return (seat.secondary ? SECONDARY_SEAT_COST : 0) + historyCost + pairComponentCost + loadCost + jitter;
+}
+
+function assignmentHistoryCost(assignment: Assignment, person: Person): number {
+  const previousRooms = new Set(person.lastRooms || []);
+  const repeatedRooms = assignment.rooms.filter((roomId) => previousRooms.has(roomId)).length;
+  const repeatedPair = assignment.rooms.length === 2 &&
+    person.lastPairKey === pairKey(assignment.rooms[0], assignment.rooms[1]);
+  return repeatedRooms * 10 + (repeatedPair ? 25 : 0);
+}
+
+function assignmentProximityCost(assignment: Assignment, roomById: Map<string, Room>): number {
+  if (assignment.rooms.length !== 2) return 0;
+  const first = roomById.get(assignment.rooms[0]);
+  const second = roomById.get(assignment.rooms[1]);
+  if (!first || !second) return INVALID_COST;
+  return distance(first, second);
+}
+
+function improveDoubleRoomProximity(
+  assignments: Assignment[],
+  personByName: Map<string, Person>,
+  roomById: Map<string, Room>,
 ): Assignment[] {
-  const P = people.length, S = slots.length, N = Math.max(P, S);
-  const M: number[][] = Array.from({ length: N }, () => Array(N).fill(0));
-  for (let i = 0; i < N; i++) {
-    for (let j = 0; j < N; j++) {
-      if (i < P && j < S) {
-        M[i][j] = isPersonEligibleForRooms(people[i], slots[j].rooms, roomById)
-          ? makeCost(people[i], slots[j], true, randJitter)
-          : 1e9;
+  const next = assignments.map((assignment) => ({
+    person: assignment.person,
+    rooms: assignment.rooms.slice(),
+  }));
+  const maxPasses = Math.min(8, Math.max(1, next.length));
+  const stateSignature = (items: Assignment[]) => items
+    .map((assignment) => `${assignment.person}:${assignment.rooms.slice().sort().join(",")}`)
+    .join("|");
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let best: { left: number; leftRoom: number; right: number; rightRoom: number; history: number; proximity: number; signature: string } | null = null;
+    const currentSignature = stateSignature(next);
+
+    for (let left = 0; left < next.length; left++) {
+      for (let right = left + 1; right < next.length; right++) {
+        const leftPerson = personByName.get(next[left].person);
+        const rightPerson = personByName.get(next[right].person);
+        if (!leftPerson || !rightPerson) continue;
+
+        const currentHistory = assignmentHistoryCost(next[left], leftPerson) + assignmentHistoryCost(next[right], rightPerson);
+        const currentProximity = assignmentProximityCost(next[left], roomById) + assignmentProximityCost(next[right], roomById);
+
+        for (let leftRoom = 0; leftRoom < next[left].rooms.length; leftRoom++) {
+          for (let rightRoom = 0; rightRoom < next[right].rooms.length; rightRoom++) {
+            const leftRooms = next[left].rooms.slice();
+            const rightRooms = next[right].rooms.slice();
+            [leftRooms[leftRoom], rightRooms[rightRoom]] = [rightRooms[rightRoom], leftRooms[leftRoom]];
+            if (!isPersonEligibleForRooms(leftPerson, leftRooms, roomById) ||
+                !isPersonEligibleForRooms(rightPerson, rightRooms, roomById)) continue;
+
+            const candidateHistory = assignmentHistoryCost({ person: leftPerson.name, rooms: leftRooms }, leftPerson) +
+              assignmentHistoryCost({ person: rightPerson.name, rooms: rightRooms }, rightPerson);
+            const candidateProximity = assignmentProximityCost({ person: leftPerson.name, rooms: leftRooms }, roomById) +
+              assignmentProximityCost({ person: rightPerson.name, rooms: rightRooms }, roomById);
+            const candidateState = next.map((assignment, index) => {
+              if (index === left) return { person: assignment.person, rooms: leftRooms };
+              if (index === right) return { person: assignment.person, rooms: rightRooms };
+              return assignment;
+            });
+            const candidateSignature = stateSignature(candidateState);
+            const improves = candidateHistory < currentHistory ||
+              (candidateHistory === currentHistory && candidateProximity < currentProximity) ||
+              (candidateHistory === currentHistory && candidateProximity === currentProximity && candidateSignature < currentSignature);
+            if (!improves) continue;
+
+            if (!best || candidateHistory < best.history ||
+                (candidateHistory === best.history && candidateProximity < best.proximity) ||
+                (candidateHistory === best.history && candidateProximity === best.proximity && candidateSignature < best.signature)) {
+              best = { left, leftRoom, right, rightRoom, history: candidateHistory, proximity: candidateProximity, signature: candidateSignature };
+            }
+          }
+        }
       }
-      else if (i < P && j >= S) M[i][j] = 500 + (randJitter ? Math.floor(randJitter() * 2) : 0);
-      else if (i >= P && j < S) M[i][j] = 1000 + (randJitter ? Math.floor(randJitter() * 2) : 0);
-      else M[i][j] = 0;
+    }
+
+    if (!best) break;
+    [next[best.left].rooms[best.leftRoom], next[best.right].rooms[best.rightRoom]] =
+      [next[best.right].rooms[best.rightRoom], next[best.left].rooms[best.leftRoom]];
+  }
+
+  for (const assignment of next) {
+    assignment.rooms.sort((left, right) => (roomById.get(left)?.number || 0) - (roomById.get(right)?.number || 0));
+  }
+  return next;
+}
+
+function assignRoomsToCapacitySeats(
+  people: Person[],
+  rooms: Room[],
+  randJitter: (() => number) | null,
+): Assignment[] {
+  const seats: CapacitySeat[] = [
+    ...people.map((person) => ({ person, secondary: false })),
+    ...people.filter((person) => person.canDouble).map((person) => ({ person, secondary: true })),
+  ];
+  const size = Math.max(seats.length, rooms.length);
+  const matrix: number[][] = Array.from({ length: size }, () => Array(size).fill(0));
+
+  for (let row = 0; row < size; row++) {
+    for (let column = 0; column < size; column++) {
+      if (row < seats.length && column < rooms.length) {
+        matrix[row][column] = seatRoomCost(seats[row], rooms[column], randJitter);
+      } else if (row >= seats.length && column < rooms.length) {
+        matrix[row][column] = INVALID_COST;
+      }
     }
   }
+
   const MunkresCtor: any = (Munkres as any)?.Munkres || (Munkres as any);
-  const mk: any = new MunkresCtor();
-  const idxs: [number, number][] = mk.compute(M);
-  const out: Assignment[] = [];
-  for (const [ri, cj] of idxs) {
-    if (ri < P && cj < S && isPersonEligibleForRooms(people[ri], slots[cj].rooms, roomById)) {
-      out.push({ person: people[ri].name, rooms: slots[cj].rooms.slice() });
-    }
+  const matches: [number, number][] = new MunkresCtor().compute(matrix);
+  const roomsByPerson = new Map<string, string[]>();
+  for (const [seatIndex, roomIndex] of matches) {
+    if (seatIndex >= seats.length || roomIndex >= rooms.length) continue;
+    if (matrix[seatIndex][roomIndex] >= INVALID_COST) continue;
+    const personName = seats[seatIndex].person.name;
+    roomsByPerson.set(personName, [...(roomsByPerson.get(personName) || []), rooms[roomIndex].id]);
   }
-  return out;
+
+  const roomOrder = new Map(rooms.map((room, index) => [room.id, index]));
+  const collapsed = people.flatMap((person): Assignment[] => {
+    const assignedRooms = roomsByPerson.get(person.name);
+    if (!assignedRooms?.length) return [];
+    assignedRooms.sort((left, right) => (roomOrder.get(left) || 0) - (roomOrder.get(right) || 0));
+    return [{ person: person.name, rooms: assignedRooms }];
+  });
+  const personByName = new Map(people.map((person) => [person.name, person]));
+  const roomById = new Map(rooms.map((room) => [room.id, room]));
+  return improveDoubleRoomProximity(collapsed, personByName, roomById);
 }
 
 export function generateAssignment(
@@ -274,49 +335,7 @@ export function generateAssignment(
   if (!peopleRaw.length || !enabledRooms.length) return [];
 
   const people = shufflePeople && randJitter ? shuffle(peopleRaw.slice(), randJitter) : peopleRaw.slice();
-  const roomById = new Map(enabledRooms.map((r) => [r.id, r]));
-
-  const R = enabledRooms.length, P = people.length;
-  const D = Math.max(0, R - P);
-
-  const used = new Set<string>();
-  const pairs1 = greedyAdjacentPairs(enabledRooms, D, used);
-  let pairs = pairs1.slice();
-  if (pairs.length < D) {
-    const extra = fillPairsByNearest(enabledRooms, D - pairs.length, used);
-    pairs = pairs.concat(extra);
-  }
-
-  const singles: Slot[] = enabledRooms.filter((r) => !used.has(r.id)).map((r) => ({ id: r.id, rooms: [r.id] }));
-  const slots: Slot[] = [...pairs, ...singles];
-
-  const base = hungarianAssign(people, slots, randJitter, roomById);
-
-  const assignedRooms = new Set(base.flatMap((a) => a.rooms));
-  const still = enabledRooms.filter((r) => !assignedRooms.has(r.id));
-  if (still.length) {
-    const usedBy: Map<string, number> = new Map();
-    for (const a of base) usedBy.set(a.person, (usedBy.get(a.person) || 0) + a.rooms.length);
-    const pool = people.slice().sort((a, b) => (usedBy.get(a.name) || 0) - (usedBy.get(b.name) || 0));
-    let pi = 0;
-    for (const r of still) {
-      let chosen: Person | null = null;
-      for (let k = 0; k < pool.length; k++) {
-        const cand = pool[(pi + k) % pool.length];
-        const cur = usedBy.get(cand.name) || 0;
-        if (isPersonEligibleForRooms(cand, [r.id], roomById) && (cur === 0 || (cur >= 1 && cand.canDouble))) {
-          chosen = cand;
-          pi = (pi + k + 1) % pool.length;
-          break;
-        }
-      }
-      if (chosen) {
-        base.push({ person: chosen.name, rooms: [r.id] });
-        usedBy.set(chosen.name, (usedBy.get(chosen.name) || 0) + 1);
-      }
-    }
-  }
-  return base;
+  return assignRoomsToCapacitySeats(people, enabledRooms, randJitter);
 }
 
 function assignmentsAreValid(assignments: Assignment[], people: Person[], enabledRooms: Room[]): boolean {
@@ -324,12 +343,21 @@ function assignmentsAreValid(assignments: Assignment[], people: Person[], enable
   const assigned = assignments.flatMap((assignment) => assignment.rooms);
   const personByName = new Map(people.map((person) => [person.name, person]));
   const roomById = new Map(enabledRooms.map((room) => [room.id, room]));
+  const roomsByPerson = new Map<string, string[]>();
+  for (const assignment of assignments) {
+    roomsByPerson.set(assignment.person, [
+      ...(roomsByPerson.get(assignment.person) || []),
+      ...assignment.rooms,
+    ]);
+  }
+
   return assigned.length === expected.size &&
     new Set(assigned).size === expected.size &&
     assigned.every((roomId) => expected.has(roomId)) &&
-    assignments.every((assignment) => {
-      const person = personByName.get(assignment.person);
-      return !!person && isPersonEligibleForRooms(person, assignment.rooms, roomById);
+    Array.from(roomsByPerson).every(([personName, roomIds]) => {
+      const person = personByName.get(personName);
+      const capacity = person?.canDouble ? 2 : 1;
+      return !!person && roomIds.length <= capacity && isPersonEligibleForRooms(person, roomIds, roomById);
     });
 }
 

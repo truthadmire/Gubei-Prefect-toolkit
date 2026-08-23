@@ -2,13 +2,19 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { GENERATION_HISTORY_KEY } from "./lib/history";
+import { packRotaCodeV2 } from "./lib/rota";
 
 const toJpegMock = vi.hoisted(() => (
   vi.fn<(node: HTMLElement) => Promise<string>>().mockResolvedValue("data:image/jpeg;base64,AAEC")
 ));
+const toPngMock = vi.hoisted(() => (
+  vi.fn<(node: HTMLElement) => Promise<string>>().mockResolvedValue("data:image/png;base64,AAEC")
+));
 
 vi.mock("html-to-image", () => ({
   toJpeg: toJpegMock,
+  toPng: toPngMock,
 }));
 
 const roster = {
@@ -63,6 +69,8 @@ describe("App editorial setup workspace", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     toJpegMock.mockReset();
     toJpegMock.mockResolvedValue("data:image/jpeg;base64,AAEC");
+    toPngMock.mockReset();
+    toPngMock.mockResolvedValue("data:image/png;base64,AAEC");
   });
 
   afterEach(() => {
@@ -87,6 +95,7 @@ describe("App editorial setup workspace", () => {
     expect(screen.getByText("Announcement date")).toBeVisible();
     expect(screen.getByLabelText("Announcement date")).toBeVisible();
     expect(screen.queryByRole("link", { name: /get started/i })).not.toBeInTheDocument();
+    expect(document.documentElement.lang).toBe("en");
   });
 
   it("keeps the setup workflow in a logical DOM order", async () => {
@@ -108,6 +117,33 @@ describe("App editorial setup workspace", () => {
     }
   });
 
+  it("searches device history, shows sync state, and clears only this device", async () => {
+    const savedAt = new Date().toISOString();
+    window.localStorage.setItem(GENERATION_HISTORY_KEY, JSON.stringify([{
+      id: "40fdf22f-b96c-46a7-b575-dbd1e06d23f2",
+      savedAt,
+      updatedAt: savedAt,
+      title: "Assembly duty",
+      date: savedAt.slice(0, 10),
+      code: "ROTAv2.saved.code",
+      assignments: [{ person: "Alice Chen", rooms: ["N201"] }],
+      editToken: "a".repeat(43),
+      source: "device",
+      syncStatus: "queued",
+    }]));
+    const user = await renderReady();
+
+    expect(screen.getByRole("option", { name: /Assembly duty.*Waiting to share/ })).toBeVisible();
+    expect(screen.getByText("Waiting to share")).toBeVisible();
+    await user.type(screen.getByLabelText("Search history"), "no match");
+    expect(screen.getByText("No matching history")).toBeVisible();
+    await user.clear(screen.getByLabelText("Search history"));
+    await user.click(screen.getByRole("button", { name: "Clear this device" }));
+
+    expect(window.localStorage.getItem(GENERATION_HISTORY_KEY)).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Local history cleared");
+  });
+
   it("downloads the generated workbook with the .xlsx extension", async () => {
     const downloadedNames: string[] = [];
     Object.defineProperty(URL, "createObjectURL", {
@@ -125,7 +161,7 @@ describe("App editorial setup workspace", () => {
 
     await user.click(screen.getByRole("button", { name: "Download Excel" }));
 
-    expect(downloadedNames).toHaveLength(1);
+    await waitFor(() => expect(downloadedNames).toHaveLength(1));
     expect(downloadedNames[0]).toMatch(/\.xlsx$/);
   });
 
@@ -259,6 +295,7 @@ describe("App editorial setup workspace", () => {
     await user.click(form9C);
 
     fireEvent.change(screen.getByLabelText("Previous rota code"), { target: { value: "not-a-rota-code" } });
+    await user.click(screen.getByRole("button", { name: "Apply code" }));
 
     const status = screen.getByRole("status");
     await waitFor(() => expect(status).toHaveTextContent("Invalid or incompatible rota code"));
@@ -267,6 +304,44 @@ describe("App editorial setup workspace", () => {
     expect(screen.getByRole("checkbox", { name: "Alice Chen Selected" })).toBeChecked();
     expect(status).toHaveAttribute("aria-live", "polite");
     expect(status).toHaveAttribute("aria-atomic", "true");
+  });
+
+  it("imports history only after Apply code and can explicitly clear it", async () => {
+    const user = await renderReady();
+    const code = await packRotaCodeV2({
+      date: "2026-07-10",
+      assignments: [{ person: "Alice Chen", rooms: ["N201"] }],
+    });
+
+    fireEvent.change(screen.getByLabelText("Previous rota code"), { target: { value: code } });
+    expect(screen.getByRole("status")).not.toHaveTextContent("Imported last rota code");
+
+    await user.click(screen.getByRole("button", { name: "Apply code" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Imported last rota code"));
+
+    await user.click(screen.getByRole("button", { name: "Clear imported history" }));
+    expect(screen.getByRole("status")).toHaveTextContent("Imported assignment history cleared");
+  });
+
+  it("updates one stable local history session after a result swap", async () => {
+    const user = await generateResult();
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem(GENERATION_HISTORY_KEY) || "[]");
+      expect(stored).toHaveLength(1);
+    });
+    const before = JSON.parse(window.localStorage.getItem(GENERATION_HISTORY_KEY) || "[]") as Array<{ id: string; code: string }>;
+    const alice = screen.getAllByRole("button", { name: /Alice Chen.*Academia/i })[0];
+    const bob = screen.getAllByRole("button", { name: /Bob Zhang.*Charity/i })[0];
+
+    await user.click(alice);
+    await user.click(bob);
+
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem(GENERATION_HISTORY_KEY) || "[]") as Array<{ id: string; code: string }>;
+      expect(stored).toHaveLength(1);
+      expect(stored[0].id).toBe(before[0].id);
+      expect(stored[0].code).not.toBe(before[0].code);
+    });
   });
 
   it("announces a blocked paired-slot swap and leaves every room and person label unchanged", async () => {
@@ -382,8 +457,29 @@ describe("App editorial setup workspace", () => {
     await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
     expect(share).toHaveBeenCalledTimes(1);
     expect(write.mock.calls[0][0][0]).toBeInstanceOf(FakeClipboardItem);
+    expect(Object.keys(write.mock.calls[0][0][0].data)).toEqual(["image/png"]);
+    expect(write.mock.calls[0][0][0].data["image/png"].type).toBe("image/png");
     expect(screen.getByRole("status")).toHaveTextContent("image copied instead");
     expect(screen.getByRole("status")).not.toHaveTextContent("Sharing is unavailable");
+  });
+
+  it("does not attempt a clipboard image type the browser reports as unsupported", async () => {
+    const user = await generateResult();
+    const write = vi.fn().mockResolvedValue(undefined);
+    class FakeClipboardItem {
+      static supports = vi.fn(() => false);
+      constructor(readonly data: Record<string, Blob>) {}
+    }
+    Object.defineProperty(navigator, "canShare", { configurable: true, value: undefined });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { write } });
+    vi.stubGlobal("ClipboardItem", FakeClipboardItem);
+
+    await user.click(screen.getByRole("button", { name: /^Share/i }));
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Sharing is unavailable"));
+    expect(FakeClipboardItem.supports).toHaveBeenCalledWith("image/png");
+    expect(toPngMock).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
   });
 
   it("treats native share cancellation as a quiet return", async () => {
@@ -432,5 +528,6 @@ describe("App editorial setup workspace", () => {
     expect(screen.getByRole("region", { name: "排布操作" })).toBeVisible();
     expect(screen.queryByText("Prefect rota / Assignment sheet")).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Rota actions" })).not.toBeInTheDocument();
+    expect(document.documentElement.lang).toBe("zh-CN");
   });
 });

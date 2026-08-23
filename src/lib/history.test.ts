@@ -3,6 +3,7 @@ import type { GenerationHistoryItem } from "../types";
 import {
   GENERATION_HISTORY_KEY,
   GENERATION_HISTORY_LIMIT,
+  LEGACY_GENERATION_HISTORY_KEY,
   formatHistoryLabel,
   isGenerationHistoryItem,
   mergeGenerationHistory,
@@ -16,19 +17,23 @@ function historyItem(id: string, code = `code-${id}`): GenerationHistoryItem {
   return {
     id,
     savedAt: "2026-07-11T00:00:00.000Z",
+    updatedAt: "2026-07-11T00:00:00.000Z",
     title: `Rota ${id}`,
     date: "2026-07-11",
     code,
     assignments: [{ person: "A", rooms: ["N201"] }],
+    editToken: "test-edit-token",
+    source: "device",
+    syncStatus: "local",
   };
 }
 
-function memoryStorage(raw: string | null = null): {
+function memoryStorage(raw: string | null = null, key = GENERATION_HISTORY_KEY): {
   storage: HistoryStorage;
   readRaw: () => string | null;
 } {
   const values = new Map<string, string>();
-  if (raw !== null) values.set(GENERATION_HISTORY_KEY, raw);
+  if (raw !== null) values.set(key, raw);
 
   return {
     storage: {
@@ -41,9 +46,10 @@ function memoryStorage(raw: string | null = null): {
 }
 
 describe("history constants", () => {
-  it("uses the versioned storage key and a 20-item limit", () => {
-    expect(GENERATION_HISTORY_KEY).toBe("gubei-prefect-toolkit.generation-history.v1");
-    expect(GENERATION_HISTORY_LIMIT).toBe(20);
+  it("uses the v2 storage key and a 200-item device limit", () => {
+    expect(GENERATION_HISTORY_KEY).toBe("gubei-prefect-toolkit.generation-history.v2");
+    expect(LEGACY_GENERATION_HISTORY_KEY).toBe("gubei-prefect-toolkit.generation-history.v1");
+    expect(GENERATION_HISTORY_LIMIT).toBe(200);
   });
 });
 
@@ -77,16 +83,50 @@ describe("readGenerationHistory", () => {
     const invalid = { ...historyItem("invalid"), assignments: [{ person: "A", rooms: [201] }] };
     const { storage } = memoryStorage(JSON.stringify([first, invalid, second]));
 
-    expect(readGenerationHistory(storage)).toEqual([first, second]);
+    expect(readGenerationHistory(storage, new Date("2026-08-01"))).toEqual([first, second]);
   });
 
-  it("returns only the first 20 valid entries", () => {
-    const items = Array.from({ length: 25 }, (_, index) => historyItem(String(index)));
+  it("returns only the first 200 valid entries", () => {
+    const items = Array.from({ length: 205 }, (_, index) => historyItem(String(index)));
     const { storage } = memoryStorage(JSON.stringify(items));
 
-    expect(readGenerationHistory(storage).map(({ id }) => id)).toEqual(
+    expect(readGenerationHistory(storage, new Date("2026-08-01")).map(({ id }) => id)).toEqual(
       items.slice(0, GENERATION_HISTORY_LIMIT).map(({ id }) => id),
     );
+  });
+
+  it("migrates valid v1 entries into v2 storage and removes the legacy key", () => {
+    const legacy = {
+      id: "legacy",
+      savedAt: "2026-07-11T00:00:00.000Z",
+      title: "Legacy rota",
+      date: "2026-07-11",
+      code: "legacy-code",
+      assignments: [{ person: "A", rooms: ["N201"] }],
+    };
+    const values = new Map([[LEGACY_GENERATION_HISTORY_KEY, JSON.stringify([legacy])]]);
+    const storage: HistoryStorage = {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => values.set(key, value),
+      removeItem: (key) => values.delete(key),
+    };
+
+    const migrated = readGenerationHistory(storage, new Date("2026-08-01"));
+
+    expect(migrated).toHaveLength(1);
+    expect(migrated[0]).toMatchObject({ source: "device", syncStatus: "local" });
+    expect(migrated[0].id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(migrated[0].editToken).toHaveLength(43);
+    expect(values.has(LEGACY_GENERATION_HISTORY_KEY)).toBe(false);
+    expect(values.has(GENERATION_HISTORY_KEY)).toBe(true);
+  });
+
+  it("drops records outside the 90-day retention window", () => {
+    const recent = historyItem("recent");
+    const expired = { ...historyItem("expired"), savedAt: "2026-04-01T00:00:00.000Z" };
+    const { storage } = memoryStorage(JSON.stringify([recent, expired]));
+
+    expect(readGenerationHistory(storage, new Date("2026-08-01"))).toEqual([recent]);
   });
 
   it("returns an empty list when storage reading fails", () => {
@@ -111,8 +151,8 @@ describe("readGenerationHistoryFrom", () => {
 });
 
 describe("writeGenerationHistory", () => {
-  it("writes only the first 20 entries", () => {
-    const items = Array.from({ length: 25 }, (_, index) => historyItem(String(index)));
+  it("writes only the first 200 entries", () => {
+    const items = Array.from({ length: 205 }, (_, index) => historyItem(String(index)));
     const target = memoryStorage();
 
     writeGenerationHistory(target.storage, items);
@@ -148,22 +188,22 @@ describe("writeGenerationHistory", () => {
 });
 
 describe("mergeGenerationHistory", () => {
-  it("puts the newest item first, removes an older same-code item, and caps at 20", () => {
-    const duplicate = historyItem("duplicate", "same-code");
+  it("puts an updated session first, replaces the same id, and caps at 200", () => {
+    const duplicate = historyItem("same-session", "old-code");
     const existing = [
       historyItem("first"),
       duplicate,
-      ...Array.from({ length: 22 }, (_, index) => historyItem(`tail-${index}`)),
+      ...Array.from({ length: 202 }, (_, index) => historyItem(`tail-${index}`)),
     ];
-    const newest = historyItem("newest", "same-code");
+    const newest = historyItem("same-session", "new-code");
 
     const merged = mergeGenerationHistory(existing, newest);
 
     expect(merged).toHaveLength(GENERATION_HISTORY_LIMIT);
     expect(merged[0]).toEqual(newest);
-    expect(merged.some(({ id }) => id === duplicate.id)).toBe(false);
+    expect(merged.filter(({ id }) => id === duplicate.id)).toHaveLength(1);
     expect(merged.slice(1).map(({ id }) => id)).toEqual(
-      existing.filter(({ code }) => code !== newest.code).slice(0, GENERATION_HISTORY_LIMIT - 1).map(({ id }) => id),
+      existing.filter(({ id }) => id !== newest.id).slice(0, GENERATION_HISTORY_LIMIT - 1).map(({ id }) => id),
     );
   });
 

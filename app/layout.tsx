@@ -83,7 +83,7 @@ export async function generateMetadata(): Promise<Metadata> {
   } catch {
     metadataBase = new URL("http://localhost");
   }
-  const socialImage = new URL("/og.png", metadataBase).toString();
+  const socialImage = new URL("/og.jpg", metadataBase).toString();
 
   return {
     metadataBase,

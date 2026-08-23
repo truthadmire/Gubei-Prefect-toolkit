@@ -47,10 +47,16 @@ export type JpegExportCache = {
 export type GenerationHistoryItem = {
   id: string;
   savedAt: string;
+  updatedAt?: string;
+  expiresAt?: string;
   title: string;
   date: string;
   code: string;
   assignments: Assignment[];
+  rosterRevision?: string;
+  editToken?: string;
+  source?: "device" | "shared";
+  syncStatus?: "local" | "queued" | "shared" | "failed";
 };
 
 export type RosterJson = {

@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
 import type { AppCopy } from "../i18n";
 import { formatHistoryLabel } from "../lib/history";
 import { deptStyleOf } from "../lib/departments";
@@ -14,19 +17,26 @@ type SetupWorkspaceProps = {
   date: string;
   rotaCode: string;
   history: GenerationHistoryItem[];
+  historyHasMore: boolean;
+  historyLoading: boolean;
+  sharedHistoryEnabled: boolean;
   selectedHistoryId: string;
   personGroups: PersonGroup[];
   formGroups: FormGroup[];
   allowedForms: Set<string>;
   summary: GenerationSummary;
   canGenerate: boolean;
+  importBusy: boolean;
   generateButtonRef: React.RefObject<HTMLButtonElement | null>;
   onTitleChange: (value: string) => void;
   onDateChange: (value: string) => void;
   onRotaCodeChange: (value: string) => void;
+  onRotaCodeApply: () => void;
+  onImportedHistoryClear: () => void;
   onHistorySelectionChange: (id: string) => void;
   onHistoryLoad: () => void;
   onHistoryClear: () => void;
+  onHistoryLoadMore: () => void;
   onPersonToggle: (id: string) => void;
   onDoubleToggle: (id: string) => void;
   onFormToggle: (form: string) => void;
@@ -40,25 +50,65 @@ export default function SetupWorkspace({
   date,
   rotaCode,
   history,
+  historyHasMore,
+  historyLoading,
+  sharedHistoryEnabled,
   selectedHistoryId,
   personGroups,
   formGroups,
   allowedForms,
   summary,
   canGenerate,
+  importBusy,
   generateButtonRef,
   onTitleChange,
   onDateChange,
   onRotaCodeChange,
+  onRotaCodeApply,
+  onImportedHistoryClear,
   onHistorySelectionChange,
   onHistoryLoad,
   onHistoryClear,
+  onHistoryLoadMore,
   onPersonToggle,
   onDoubleToggle,
   onFormToggle,
   onGradeToggle,
   onGenerate,
 }: SetupWorkspaceProps) {
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [historyFilter, setHistoryFilter] = useState<"all" | "shared" | "device">("all");
+  const [historyVisibleCount, setHistoryVisibleCount] = useState(20);
+  const filteredHistory = useMemo(() => {
+    const query = historyQuery.trim().toLocaleLowerCase();
+    return history.filter((item) => {
+      const isShared = item.source === "shared" || item.syncStatus === "shared";
+      const isDevice = item.source !== "shared";
+      const sourceMatches = historyFilter === "all" ||
+        (historyFilter === "shared" && isShared) ||
+        (historyFilter === "device" && isDevice);
+      if (!sourceMatches) return false;
+      if (!query) return true;
+      return [item.title, item.date, ...item.assignments.map((assignment) => assignment.person)]
+        .some((value) => value.toLocaleLowerCase().includes(query));
+    });
+  }, [history, historyFilter, historyQuery]);
+  const visibleHistory = filteredHistory.slice(0, historyVisibleCount);
+  const selectedHistory = history.find((item) => item.id === selectedHistoryId);
+  const syncLabel = (item: GenerationHistoryItem) => {
+    switch (item.syncStatus) {
+      case "queued": return copy.historyQueued;
+      case "shared": return copy.historySharedStatus;
+      case "failed": return copy.historyFailed;
+      default: return copy.historyLocal;
+    }
+  };
+
+  useEffect(() => {
+    if (filteredHistory.some((item) => item.id === selectedHistoryId)) return;
+    onHistorySelectionChange(filteredHistory[0]?.id || "");
+  }, [filteredHistory, onHistorySelectionChange, selectedHistoryId]);
+
   return (
     <main className="setup-workspace">
       <div className="setup-layout">
@@ -231,8 +281,58 @@ export default function SetupWorkspace({
             />
             <small>{copy.previousCodeHint}</small>
           </label>
-          {history.length > 0 && (
-            <div className="history-controls">
+          <div className="history-actions" aria-busy={importBusy}>
+            <button
+              type="button"
+              className="button button--secondary"
+              disabled={!rotaCode.trim() || importBusy}
+              aria-disabled={!rotaCode.trim() || importBusy}
+              onClick={onRotaCodeApply}
+            >
+              {importBusy ? copy.importApplying : copy.importApply}
+            </button>
+            <button
+              type="button"
+              className="button button--quiet"
+              disabled={importBusy}
+              aria-disabled={importBusy}
+              onClick={onImportedHistoryClear}
+            >
+              {copy.importClear}
+            </button>
+          </div>
+          {(history.length > 0 || sharedHistoryEnabled) && (
+            <div className="history-controls history-browser" aria-busy={historyLoading}>
+              <div className="history-browser__filters">
+                <label className="field" htmlFor="history-search">
+                  <span>{copy.historySearch}</span>
+                  <input
+                    id="history-search"
+                    type="search"
+                    value={historyQuery}
+                    onChange={(event) => {
+                      setHistoryQuery(event.target.value);
+                      setHistoryVisibleCount(20);
+                    }}
+                  />
+                </label>
+                <label className="field" htmlFor="history-filter">
+                  <span>{copy.historyFilter}</span>
+                  <select
+                    id="history-filter"
+                    value={historyFilter}
+                    onChange={(event) => {
+                      setHistoryFilter(event.target.value as "all" | "shared" | "device");
+                      setHistoryVisibleCount(20);
+                    }}
+                  >
+                    <option value="all">{copy.historyAll}</option>
+                    <option value="shared">{copy.historyShared}</option>
+                    <option value="device">{copy.historyDevice}</option>
+                  </select>
+                </label>
+              </div>
+              {visibleHistory.length > 0 ? (
               <label className="field" htmlFor="history-select">
                 <span>{copy.historyTitle}</span>
                 <select
@@ -241,18 +341,43 @@ export default function SetupWorkspace({
                   value={selectedHistoryId}
                   onChange={(event) => onHistorySelectionChange(event.target.value)}
                 >
-                  {history.map((item) => (
-                    <option key={item.id} value={item.id}>{formatHistoryLabel(item)}</option>
+                  {visibleHistory.map((item) => (
+                    <option key={item.id} value={item.id}>{formatHistoryLabel(item)} · {syncLabel(item)}</option>
                   ))}
                 </select>
               </label>
+              ) : (
+                <p className="section-hint">{historyLoading ? copy.historyLoading : copy.historyEmpty}</p>
+              )}
+              {selectedHistory && (
+                <p className={`history-sync history-sync--${selectedHistory.syncStatus || "local"}`}>
+                  {syncLabel(selectedHistory)}
+                </p>
+              )}
               <div className="history-actions">
-                <button type="button" className="button button--secondary" disabled={!selectedHistoryId} onClick={onHistoryLoad}>
+                <button type="button" className="button button--secondary" disabled={!selectedHistoryId || visibleHistory.length === 0} onClick={onHistoryLoad}>
                   {copy.historyUse}
                 </button>
                 <button type="button" className="button button--quiet" onClick={onHistoryClear}>
                   {copy.historyClear}
                 </button>
+                {(historyVisibleCount < filteredHistory.length || historyHasMore) && (
+                  <button
+                    type="button"
+                    className="button button--quiet"
+                    disabled={historyLoading}
+                    onClick={() => {
+                      if (historyVisibleCount < filteredHistory.length) {
+                        setHistoryVisibleCount((count) => count + 20);
+                      } else {
+                        setHistoryVisibleCount((count) => count + 50);
+                        onHistoryLoadMore();
+                      }
+                    }}
+                  >
+                    {historyLoading ? copy.historyLoading : copy.historyLoadMore}
+                  </button>
+                )}
               </div>
             </div>
           )}

@@ -1,6 +1,5 @@
 import type { Lang } from "../i18n";
 import type { ResultRow } from "../types";
-import { strToU8, zipSync } from "fflate";
 
 export type ExcelExportOptions = {
   title: string;
@@ -35,15 +34,29 @@ type ImageExporter = {
     node: HTMLElement,
     options: { quality: number; pixelRatio: number; backgroundColor: string },
   ) => Promise<string>;
+  toPng: (
+    node: HTMLElement,
+    options: { pixelRatio: number; backgroundColor: string },
+  ) => Promise<string>;
 };
 
 let imageExporterPromise: Promise<ImageExporter> | null = null;
 
 export function loadImageExporter(): Promise<ImageExporter> {
   if (!imageExporterPromise) {
-    imageExporterPromise = import("html-to-image").then(({ toJpeg }) => ({ toJpeg }));
+    imageExporterPromise = import("html-to-image").then(({ toJpeg, toPng }) => ({ toJpeg, toPng }));
   }
   return imageExporterPromise;
+}
+
+export const MAX_EXPORT_PIXEL_RATIO = 2;
+export const MAX_EXPORT_PIXELS = 12_000_000;
+
+export function exportPixelRatio(width: number, height: number): number {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return MAX_EXPORT_PIXEL_RATIO;
+  }
+  return Math.min(MAX_EXPORT_PIXEL_RATIO, Math.sqrt(MAX_EXPORT_PIXELS / (width * height)));
 }
 
 export function dataUrlToBlob(dataUrl: string): Blob {
@@ -66,7 +79,8 @@ export function downloadBlob(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
-export function buildExcelBlob(rows: ResultRow[], options: ExcelExportOptions): Blob {
+export async function buildExcelBlob(rows: ResultRow[], options: ExcelExportOptions): Promise<Blob> {
+  const { strToU8, zipSync } = await import("fflate");
   const styleMap = new Map<string, number>();
   for (const row of rows) {
     if (!row.personName) continue;

@@ -2,7 +2,20 @@
 
 A bilingual SUIS Gubei prefect rota builder. The app loads its local roster, lets a coordinator select prefects and forms, generates balanced room assignments, and exports the result as an image or Excel workbook.
 
-The current application uses React, TypeScript, Vinext, and Vite. Roster and generation-history data stay on the device; the project does not add accounts or a roster backend.
+The application uses React, TypeScript, Next.js on Vercel, and Vinext/Vite for the fallback build. It has no accounts. History stays local unless the explicitly gated public-history feature is enabled.
+
+## Public shared history
+
+Shared history is intentionally public and anonymous: when enabled, every successfully generated rota publishes its title, date, rota code, and assignments to a feed that anyone can read. Records expire after 90 days and the feed is capped at 200 records. There is no public delete endpoint; “Clear this device” removes only local data and the device-held edit capability.
+
+The default configuration is local-only. To enable the public feed:
+
+1. Create a Neon Postgres integration through Vercel Marketplace and expose its `DATABASE_URL` to the project.
+2. Run `db/migrations/001_shared_history.sql` against that database.
+3. Set a private `RATE_LIMIT_SECRET` containing at least 32 random bytes.
+4. Set server flag `SHARED_HISTORY_ENABLED=true` first, then client flag `NEXT_PUBLIC_SHARED_HISTORY_ENABLED=true` and redeploy.
+
+The API accepts anonymous `GET /api/shared-history`, capability-protected `POST /api/shared-history`, and capability-protected `PATCH /api/shared-history/:id`. It validates the current roster revision and rota code, limits request bodies to 64 KB, and permits 30 mutations per hashed network per hour. It does not persist or log raw IP addresses. The optional `npm run history:cleanup` command performs the same retention and cap cleanup as successful mutations.
 
 ## Local development
 
@@ -42,6 +55,8 @@ After editing the namelist, run:
 
 ```bash
 npm test
+npm run typecheck
+npm run build:vercel
 npm run build
 node --test tests/rendered-html.test.mjs
 git diff --check
@@ -60,5 +75,8 @@ The implementation plan is retained as a historical execution record. Its unchec
 
 - `npm run dev` — start the local development server
 - `npm test` — run unit and component tests
+- `npm run typecheck` — validate TypeScript without emitting files
+- `npm run build:vercel` — build the primary Next.js/Vercel target
 - `npm run build` — create the production build in `dist/`
 - `npm run start` — serve the production application locally
+- `npm run history:cleanup` — prune expired/overflow public history (requires `DATABASE_URL`)

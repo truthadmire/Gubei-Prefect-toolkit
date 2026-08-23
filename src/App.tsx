@@ -23,16 +23,30 @@ import {
 } from "./lib/rota";
 import type { GenerationFailure, GenerationSummary, SwapResult } from "./lib/rota";
 import {
+  createEditToken,
+  createHistoryId,
   GENERATION_HISTORY_KEY,
+  LEGACY_GENERATION_HISTORY_KEY,
   mergeGenerationHistory,
+  mergeLocalAndSharedHistory,
   readGenerationHistoryFrom,
   writeGenerationHistory,
 } from "./lib/history";
+import { computeRosterRevision } from "./lib/roster-revision";
+import {
+  fetchSharedHistoryPage,
+  queueSharedHistoryItem,
+  readSharedHistoryOutbox,
+  SHARED_HISTORY_ENABLED,
+  SHARED_HISTORY_OUTBOX_KEY,
+  syncQueuedSharedHistory,
+} from "./lib/shared-history-client";
 import {
   buildBoardExportKey,
   buildExcelBlob,
   dataUrlToBlob,
   downloadBlob,
+  exportPixelRatio,
   loadImageExporter,
   safeFilePart,
 } from "./lib/export";
@@ -56,7 +70,7 @@ import type {
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 /** ---- roster.json ---- */
-async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
+async function loadRoster(): Promise<{ people: Person[]; rooms: Room[]; revision: string }> {
   const res = await fetch("/roster.json");
   if (!res.ok) throw new Error("roster.json not found");
   const value: unknown = await res.json();
@@ -103,7 +117,7 @@ async function loadRoster(): Promise<{ people: Person[]; rooms: Room[] }> {
     };
   });
 
-  return { people, rooms };
+  return { people, rooms, revision: await computeRosterRevision(j.people, j.rooms) };
 }
 
 /** =========================
@@ -122,6 +136,7 @@ export default function App() {
   const [rosterAttempt, setRosterAttempt] = useState(0);
   const [people, setPeople] = useState<Person[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [rosterRevision, setRosterRevision] = useState("");
 
   const [step, setStep] = useState<1 | 2>(1);
   const [title, setTitle] = useState("");
@@ -131,15 +146,35 @@ export default function App() {
   const [dragRoomId, setDragRoomId] = useState<string | null>(null);
   const [selectedSwapRoomId, setSelectedSwapRoomId] = useState<string | null>(null);
   const [rotaCodeIn, setRotaCodeIn] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+  const importRequest = useRef(0);
   const [allowedForms, setAllowedForms] = useState<Set<string>>(new Set());
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const boardRef = useRef<HTMLDivElement>(null);
   const imageExportCache = useRef<JpegExportCache | null>(null);
+  const pngExportCache = useRef<JpegExportCache | null>(null);
   const shouldPersistGenerationHistory = useRef(false);
   const [generationHistory, setGenerationHistory] = useState<GenerationHistoryItem[]>([]);
+  const generationHistoryRef = useRef<GenerationHistoryItem[]>([]);
+  const [sharedHistory, setSharedHistory] = useState<GenerationHistoryItem[]>([]);
+  const [sharedHistoryCursor, setSharedHistoryCursor] = useState<string | null>(null);
+  const [sharedHistoryLoading, setSharedHistoryLoading] = useState(false);
+  const sharedHistoryStarted = useRef(false);
+  const autoPublishStarted = useRef(false);
+  const syncRunning = useRef(false);
+  const syncTimer = useRef<number | null>(null);
+  const currentGeneration = useRef<{
+    id: string;
+    editToken?: string;
+    savedAt: string;
+    title: string;
+    date: string;
+  } | null>(null);
+  const generationRevision = useRef(0);
   const [selectedHistoryId, setSelectedHistoryId] = useState("");
 
   const [generatedCode, setGeneratedCode] = useState("");
+  const [exportBusy, setExportBusy] = useState<"jpg" | "share" | "excel" | null>(null);
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null);
   const showToast = (text: string, ms = 2000) => {
     const id = Date.now();
@@ -154,7 +189,9 @@ export default function App() {
       if (storedLanguage === "zh" || storedLanguage === "en") {
         updateLanguage(storedLanguage);
       }
-      setGenerationHistory(readGenerationHistoryFrom(() => storage));
+      const localHistory = readGenerationHistoryFrom(() => storage);
+      generationHistoryRef.current = localHistory;
+      setGenerationHistory(localHistory);
     } catch (error) {
       console.warn("Could not hydrate local preferences", error);
     } finally {
@@ -172,6 +209,11 @@ export default function App() {
   }, [clientStateHydrated, lang]);
 
   useEffect(() => {
+    document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  }, [lang]);
+
+  useEffect(() => {
+    generationHistoryRef.current = generationHistory;
     if (!shouldPersistGenerationHistory.current) return;
     shouldPersistGenerationHistory.current = false;
     try {
@@ -185,10 +227,11 @@ export default function App() {
     let cancelled = false;
     setRosterState("loading");
     loadRoster()
-      .then(({ people, rooms }) => {
+      .then(({ people, rooms, revision }) => {
         if (cancelled) return;
         setPeople(people);
         setRooms(rooms);
+        setRosterRevision(revision);
         const forms = Array.from(new Set(rooms.map((r) => r.form || ""))).filter(Boolean).sort();
         setAllowedForms(new Set(forms));
         setRosterState("ready");
@@ -203,76 +246,242 @@ export default function App() {
     };
   }, [rosterAttempt]);
 
-  useEffect(() => {
-    if (!rotaCodeIn.trim() || !people.length) return;
-    (async () => {
-      try {
-        const payload = await unpackRotaCodeCompat(rotaCodeIn.trim());
-        setPeople((current) => applyImportedAssignments(current, payload.assignments));
-        showToast(L.importOk);
-      } catch (e) {
-        console.warn(e);
-        showToast(L.importFail);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rotaCodeIn, people.length, lang]);
+  function changeRotaCode(value: string) {
+    importRequest.current += 1;
+    setImportBusy(false);
+    setRotaCodeIn(value);
+  }
+
+  async function applyPreviousCode() {
+    const code = rotaCodeIn.trim();
+    if (!code || !people.length) return;
+    const request = ++importRequest.current;
+    setImportBusy(true);
+    try {
+      const payload = await unpackRotaCodeCompat(code);
+      if (request !== importRequest.current) return;
+      setPeople((current) => applyImportedAssignments(current, payload.assignments));
+      showToast(L.importOk);
+    } catch (error) {
+      if (request !== importRequest.current) return;
+      console.warn(error);
+      showToast(L.importFail);
+    } finally {
+      if (request === importRequest.current) setImportBusy(false);
+    }
+  }
+
+  function clearImportedAssignments() {
+    importRequest.current += 1;
+    setImportBusy(false);
+    setPeople((current) => current.map((person) => {
+      const { lastRooms: _lastRooms, lastPairKey: _lastPairKey, ...rest } = person;
+      return rest;
+    }));
+    showToast(L.importCleared);
+  }
+
+  const combinedHistory = useMemo(
+    () => mergeLocalAndSharedHistory(generationHistory, sharedHistory),
+    [generationHistory, sharedHistory],
+  );
 
   useEffect(() => {
     setSelectedHistoryId((current) => {
-      if (generationHistory.some((item) => item.id === current)) return current;
-      return generationHistory[0]?.id || "";
+      if (combinedHistory.some((item) => item.id === current)) return current;
+      return combinedHistory[0]?.id || "";
     });
-  }, [generationHistory]);
+  }, [combinedHistory]);
 
-  function rememberGeneration(titleValue: string, dateValue: string, code: string, nextAssignments: Assignment[]) {
-    const item: GenerationHistoryItem = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      savedAt: new Date().toISOString(),
-      title: titleValue,
-      date: dateValue,
-      code,
-      assignments: nextAssignments.map((assignment) => ({ person: assignment.person, rooms: assignment.rooms.slice() })),
-    };
-
+  function replaceLocalHistory(items: GenerationHistoryItem[]) {
+    generationHistoryRef.current = items;
     shouldPersistGenerationHistory.current = true;
-    setGenerationHistory((prev) => mergeGenerationHistory(prev, item));
+    setGenerationHistory(items);
   }
 
+  function scheduleSharedHistorySync(delayMs = 0) {
+    if (!SHARED_HISTORY_ENABLED) return;
+    if (syncTimer.current !== null) window.clearTimeout(syncTimer.current);
+    syncTimer.current = window.setTimeout(() => {
+      syncTimer.current = null;
+      void flushSharedHistoryOutbox();
+    }, delayMs);
+  }
+
+  async function flushSharedHistoryOutbox() {
+    if (!SHARED_HISTORY_ENABLED || syncRunning.current) return;
+    syncRunning.current = true;
+    try {
+      const results = await syncQueuedSharedHistory(window.localStorage);
+      if (results.length) {
+        let nextLocal = generationHistoryRef.current.map((item) => ({ ...item }));
+        for (const result of results) {
+          const index = nextLocal.findIndex((item) => item.id === result.id);
+          if (index >= 0) {
+            nextLocal[index] = result.status === "shared" && result.item
+              ? {
+                  ...nextLocal[index],
+                  savedAt: result.item.savedAt,
+                  updatedAt: result.item.updatedAt,
+                  expiresAt: result.item.expiresAt,
+                  syncStatus: "shared",
+                  source: "device",
+                }
+              : { ...nextLocal[index], syncStatus: "failed" };
+          }
+          if (result.status === "shared" && result.item) {
+            setSharedHistory((current) => mergeGenerationHistory(current, result.item!));
+          }
+        }
+        replaceLocalHistory(nextLocal);
+      }
+    } catch {
+      // The local copy and outbox remain available for the next retry.
+    } finally {
+      syncRunning.current = false;
+      const queued = readSharedHistoryOutbox(window.localStorage);
+      if (queued.length) {
+        const nextAttempt = Math.min(...queued.map((item) => new Date(item.nextAttemptAt).getTime()));
+        const delay = Number.isFinite(nextAttempt) ? Math.max(250, nextAttempt - Date.now()) : 5_000;
+        scheduleSharedHistorySync(Math.min(delay, 5 * 60_000));
+      }
+    }
+  }
+
+  function storeGenerationHistoryItem(item: GenerationHistoryItem, syncDelayMs: number) {
+    let stored: GenerationHistoryItem = { ...item, source: "device" };
+    if (SHARED_HISTORY_ENABLED) {
+      try {
+        stored = queueSharedHistoryItem(window.localStorage, stored);
+      } catch {
+        stored = { ...stored, syncStatus: "local" };
+      }
+    }
+    replaceLocalHistory(mergeGenerationHistory(generationHistoryRef.current, stored));
+    if (stored.syncStatus === "queued") scheduleSharedHistorySync(syncDelayMs);
+  }
+
+  async function finalizeCurrentGeneration(
+    nextAssignments: Assignment[],
+    copyAfterGeneration: boolean,
+    syncDelayMs: number,
+  ) {
+    const session = currentGeneration.current;
+    if (!session) return;
+    const revision = ++generationRevision.current;
+    const code = await packRotaCodeV2({ date: session.date, assignments: nextAssignments });
+    if (currentGeneration.current !== session || revision !== generationRevision.current) return;
+
+    setGeneratedCode(code);
+    const existing = generationHistoryRef.current.find((item) => item.id === session.id);
+    const now = new Date().toISOString();
+    storeGenerationHistoryItem({
+      ...existing,
+      id: session.id,
+      savedAt: session.savedAt,
+      updatedAt: now,
+      title: session.title,
+      date: session.date,
+      code,
+      assignments: nextAssignments.map((assignment) => ({
+        person: assignment.person,
+        rooms: assignment.rooms.slice(),
+      })),
+      rosterRevision,
+      editToken: session.editToken,
+      source: "device",
+      syncStatus: existing?.syncStatus || "local",
+    }, syncDelayMs);
+
+    if (copyAfterGeneration) {
+      const clipboard = navigator.clipboard;
+      if (!clipboard?.writeText) {
+        showToast(L.clipboardUnavailable);
+      } else {
+        clipboard.writeText(code).then(
+          () => showToast(L.copyOk),
+          () => showToast(L.copyFail),
+        );
+      }
+    }
+  }
+
+  async function loadNextSharedHistoryPage(reset = false) {
+    if (!SHARED_HISTORY_ENABLED || sharedHistoryLoading) return;
+    setSharedHistoryLoading(true);
+    try {
+      const page = await fetchSharedHistoryPage(reset ? null : sharedHistoryCursor);
+      setSharedHistory((current) => reset
+        ? page.items
+        : mergeLocalAndSharedHistory(current, page.items));
+      setSharedHistoryCursor(page.nextCursor);
+    } catch {
+      // Shared history is additive; setup remains fully usable from local state.
+    } finally {
+      setSharedHistoryLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!SHARED_HISTORY_ENABLED || !clientStateHydrated) return;
+    const onOnline = () => scheduleSharedHistorySync(0);
+    window.addEventListener("online", onOnline);
+    scheduleSharedHistorySync(0);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      if (syncTimer.current !== null) window.clearTimeout(syncTimer.current);
+    };
+  }, [clientStateHydrated]);
+
+  useEffect(() => {
+    if (!SHARED_HISTORY_ENABLED || !clientStateHydrated || !rosterRevision || autoPublishStarted.current) return;
+    autoPublishStarted.current = true;
+    const queued = generationHistoryRef.current.map((item) => item.syncStatus === "shared"
+      ? item
+      : queueSharedHistoryItem(
+          window.localStorage,
+          {
+            ...item,
+            editToken: item.editToken || createEditToken(),
+            rosterRevision,
+            source: "device",
+          },
+        ));
+    if (queued.length) replaceLocalHistory(queued);
+    scheduleSharedHistorySync(0);
+  }, [clientStateHydrated, rosterRevision]);
+
+  useEffect(() => {
+    if (!SHARED_HISTORY_ENABLED || rosterState !== "ready" || sharedHistoryStarted.current) return;
+    sharedHistoryStarted.current = true;
+    void loadNextSharedHistoryPage(true);
+  }, [rosterState]);
+
   function loadSelectedHistory() {
-    const selected = generationHistory.find((item) => item.id === selectedHistoryId);
+    const selected = combinedHistory.find((item) => item.id === selectedHistoryId);
     if (!selected) return;
     setTitle(selected.title);
     setDateStr(selected.date);
-    setRotaCodeIn(selected.code);
+    changeRotaCode(selected.code);
     showToast(L.historyLoaded);
   }
 
   function clearGenerationHistory() {
     shouldPersistGenerationHistory.current = false;
+    generationHistoryRef.current = [];
     setGenerationHistory([]);
-    setSelectedHistoryId("");
+    setSelectedHistoryId(sharedHistory[0]?.id || "");
+    currentGeneration.current = null;
+    generationRevision.current += 1;
     try {
       window.localStorage.removeItem(GENERATION_HISTORY_KEY);
+      window.localStorage.removeItem(LEGACY_GENERATION_HISTORY_KEY);
+      window.localStorage.removeItem(SHARED_HISTORY_OUTBOX_KEY);
     } catch (error) {
       console.warn("Could not clear generation history", error);
     }
     showToast(L.historyCleared);
   }
-
-  useEffect(() => {
-    if (step !== 2 || !assignments.length || !dateStr.trim()) return;
-    let cancelled = false;
-    packRotaCodeV2({ date: dateStr.trim(), assignments }).then((code) => {
-      if (!cancelled) {
-        setGeneratedCode(code);
-        rememberGeneration(title.trim(), dateStr.trim(), code, assignments);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [assignments, dateStr, step]);
 
   const filteredRooms = useMemo(() => {
     return rooms.map((r) => ({ ...r, enabled: r.form ? allowedForms.has(r.form) : true }));
@@ -352,22 +561,18 @@ export default function App() {
     const randJitter = hasHistory ? null : rng;
 
     const A = generateAssignment(people, filteredRooms, randJitter, !hasHistory);
+    const savedAt = new Date().toISOString();
+    currentGeneration.current = {
+      id: createHistoryId(),
+      editToken: createEditToken(),
+      savedAt,
+      title: cleanTitle,
+      date: cleanDate,
+    };
+    generationRevision.current += 1;
     setAssignments(A);
     setStep(2);
-
-    const payload = { date: cleanDate, assignments: A };
-    packRotaCodeV2(payload).then((code) => {
-      setGeneratedCode(code);
-      const clipboard = navigator.clipboard;
-      if (!clipboard?.writeText) {
-        showToast(L.clipboardUnavailable);
-        return;
-      }
-      clipboard.writeText(code).then(
-        () => showToast(L.copyOk),
-        () => showToast(L.copyFail),
-      );
-    });
+    void finalizeCurrentGeneration(A, true, 0);
   }
 
   async function copyCode() {
@@ -394,6 +599,7 @@ export default function App() {
     }
 
     setAssignments(result.assignments);
+    void finalizeCurrentGeneration(result.assignments, false, 500);
     showToast(L.dragUpdated);
   }
 
@@ -512,74 +718,55 @@ export default function App() {
     [dateStr, lang, resultRows, title],
   );
 
-  async function getJpegExport() {
+  async function getBoardImageExport(format: "jpeg" | "png") {
     const node = boardRef.current;
     if (!node) return null;
 
-    const cached = imageExportCache.current;
-    if (cached?.key === boardExportKey && cached.exportData) return cached.exportData;
-    if (cached?.key === boardExportKey && cached.promise) return cached.promise;
+    const cacheRef = format === "jpeg" ? imageExportCache : pngExportCache;
+    const cacheKey = `${boardExportKey}:${format}`;
+    const cached = cacheRef.current;
+    if (cached?.key === cacheKey && cached.exportData) return cached.exportData;
+    if (cached?.key === cacheKey && cached.promise) return cached.promise;
 
     const promise = (async (): Promise<JpegExport> => {
       node.setAttribute("data-exporting", "true");
       try {
-        const { toJpeg } = await loadImageExporter();
-        const dataUrl = await toJpeg(node, { quality: 0.95, pixelRatio: 3, backgroundColor: "#ffffff" });
+        const exporter = await loadImageExporter();
+        const width = node.scrollWidth || node.offsetWidth;
+        const height = node.scrollHeight || node.offsetHeight;
+        const pixelRatio = exportPixelRatio(width, height);
+        const dataUrl = format === "jpeg"
+          ? await exporter.toJpeg(node, { quality: 0.92, pixelRatio, backgroundColor: "#ffffff" })
+          : await exporter.toPng(node, { pixelRatio, backgroundColor: "#ffffff" });
         return { dataUrl, blob: dataUrlToBlob(dataUrl) };
       } finally {
         node.removeAttribute("data-exporting");
       }
     })();
 
-    imageExportCache.current = { key: boardExportKey, promise };
+    cacheRef.current = { key: cacheKey, promise };
     try {
       const exportData = await promise;
-      imageExportCache.current = { key: boardExportKey, exportData };
+      cacheRef.current = { key: cacheKey, exportData };
       return exportData;
     } catch (error) {
-      if (imageExportCache.current?.promise === promise) imageExportCache.current = null;
+      if (cacheRef.current?.promise === promise) cacheRef.current = null;
       throw error;
     }
   }
 
-  useEffect(() => {
-    imageExportCache.current = null;
-    if (step !== 2 || !resultRows.length) return;
-
-    let cancelled = false;
-    const warmImageExport = () => {
-      if (cancelled || !boardRef.current) return;
-      void getJpegExport().catch((error) => console.warn("JPG export warmup failed", error));
-    };
-
-    const win = window as typeof window & {
-      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-      cancelIdleCallback?: (id: number) => void;
-    };
-    if (win.requestIdleCallback) {
-      const idleId = win.requestIdleCallback(warmImageExport, { timeout: 1500 });
-      return () => {
-        cancelled = true;
-        win.cancelIdleCallback?.(idleId);
-      };
-    }
-
-    const timeoutId = window.setTimeout(warmImageExport, 250);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timeoutId);
-    };
-  }, [boardExportKey, resultRows.length, step]);
-
-  // Uses the warmed/cached board render when available; otherwise renders once and caches it.
   async function downloadImage() {
+    if (exportBusy) return;
+    setExportBusy("jpg");
     try {
-      const image = await getJpegExport();
+      const image = await getBoardImageExport("jpeg");
       if (!image) return;
       downloadBlob(image.blob, `${exportFileBase}.jpg`);
     } catch (e) {
       console.error(e);
       showToast(L.jpgFail);
+    } finally {
+      setExportBusy(null);
     }
   }
 
@@ -587,23 +774,35 @@ export default function App() {
   // 2. Fallback to Copy Image
   // 3. Show a normal failure toast
   async function shareImage() {
+    if (exportBusy) return;
+    setExportBusy("share");
     let image: JpegExport | null;
     try {
-      image = await getJpegExport();
+      image = await getBoardImageExport("jpeg");
     } catch (e) {
       console.warn(e);
       showToast(L.jpgFail);
+      setExportBusy(null);
       return;
     }
-    if (!image) return;
+    if (!image) {
+      setExportBusy(null);
+      return;
+    }
 
     const file = new File([image.blob], `${exportFileBase}.jpg`, { type: "image/jpeg" });
     const copyImageFallback = async (): Promise<boolean> => {
       if (typeof navigator.clipboard?.write !== "function" || typeof ClipboardItem === "undefined") {
         return false;
       }
+      const clipboardItemWithSupport = ClipboardItem as typeof ClipboardItem & {
+        supports?: (type: string) => boolean;
+      };
+      if (clipboardItemWithSupport.supports && !clipboardItemWithSupport.supports("image/png")) return false;
       try {
-        await navigator.clipboard.write([new ClipboardItem({ "image/jpeg": image.blob })]);
+        const png = await getBoardImageExport("png");
+        if (!png) return false;
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": png.blob })]);
         showToast(L.shareFail);
         return true;
       } catch (error) {
@@ -615,22 +814,26 @@ export default function App() {
     if (navigator.canShare?.({ files: [file] }) && typeof navigator.share === "function") {
       try {
         await navigator.share({ files: [file], title, text: dateStr });
+        setExportBusy(null);
         return;
       } catch (error) {
         if (typeof error === "object" && error !== null && "name" in error && error.name === "AbortError") {
+          setExportBusy(null);
           return;
         }
         console.warn(error);
       }
     }
 
-    if (await copyImageFallback()) return;
-    showToast(L.shareUnavailable);
+    if (!await copyImageFallback()) showToast(L.shareUnavailable);
+    setExportBusy(null);
   }
 
-  function downloadExcel() {
+  async function downloadExcel() {
+    if (exportBusy) return;
+    setExportBusy("excel");
     try {
-      const excelExportBlob = buildExcelBlob(resultRows, {
+      const excelExportBlob = await buildExcelBlob(resultRows, {
         title,
         dateStr,
         dateLabel: L.date,
@@ -642,6 +845,8 @@ export default function App() {
     } catch (error) {
       console.error(error);
       showToast(L.excelFail);
+    } finally {
+      setExportBusy(null);
     }
   }
 
@@ -724,7 +929,10 @@ export default function App() {
           title={title}
           date={dateStr}
           rotaCode={rotaCodeIn}
-          history={generationHistory}
+          history={combinedHistory}
+          historyHasMore={sharedHistoryCursor !== null}
+          historyLoading={sharedHistoryLoading}
+          sharedHistoryEnabled={SHARED_HISTORY_ENABLED}
           selectedHistoryId={selectedHistoryId}
           personGroups={personGroups}
           formGroups={formGroups}
@@ -734,10 +942,14 @@ export default function App() {
           generateButtonRef={generateButtonRef}
           onTitleChange={setTitle}
           onDateChange={setDateStr}
-          onRotaCodeChange={setRotaCodeIn}
+          importBusy={importBusy}
+          onRotaCodeChange={changeRotaCode}
+          onRotaCodeApply={applyPreviousCode}
+          onImportedHistoryClear={clearImportedAssignments}
           onHistorySelectionChange={setSelectedHistoryId}
           onHistoryLoad={loadSelectedHistory}
           onHistoryClear={clearGenerationHistory}
+          onHistoryLoadMore={() => void loadNextSharedHistoryPage(false)}
           onPersonToggle={togglePerson}
           onDoubleToggle={toggleDouble}
           onFormToggle={toggleForm}
@@ -755,6 +967,7 @@ export default function App() {
           rowsByGrade={resultRowsByGrade}
           selectedSwapRoomId={selectedSwapRoomId}
           generatedCode={generatedCode}
+          exportBusy={exportBusy}
           boardRef={boardRef}
           labels={{
             back: L.back,

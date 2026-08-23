@@ -5,6 +5,7 @@ import {
   buildBoardExportKey,
   buildExcelBlob,
   dataUrlToBlob,
+  exportPixelRatio,
   safeFilePart,
 } from "./export";
 
@@ -40,7 +41,7 @@ async function unzipWorkbook(blob: Blob) {
 
 describe("OOXML workbook exports", () => {
   it("creates a genuine .xlsx ZIP package with the required workbook parts", async () => {
-    const blob = buildExcelBlob([resultRow()], excelOptions);
+    const blob = await buildExcelBlob([resultRow()], excelOptions);
 
     expect(blob.type).toBe("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     expect(Array.from(new Uint8Array(await blob.slice(0, 4).arrayBuffer()))).toEqual([0x50, 0x4b, 0x03, 0x04]);
@@ -59,7 +60,7 @@ describe("OOXML workbook exports", () => {
   });
 
   it("escapes every user-facing field inside the worksheet", async () => {
-    const archive = await unzipWorkbook(buildExcelBlob([resultRow()], excelOptions));
+    const archive = await unzipWorkbook(await buildExcelBlob([resultRow()], excelOptions));
     const xml = strFromU8(archive["xl/worksheets/sheet1.xml"]);
 
     expect(xml).toContain("Morning &amp; &lt;Assembly&gt;");
@@ -72,7 +73,7 @@ describe("OOXML workbook exports", () => {
   });
 
   it("renders an empty assignment as a visible dash", async () => {
-    const archive = await unzipWorkbook(buildExcelBlob([resultRow({ personName: "" })], excelOptions));
+    const archive = await unzipWorkbook(await buildExcelBlob([resultRow({ personName: "" })], excelOptions));
     const xml = strFromU8(archive["xl/worksheets/sheet1.xml"]);
 
     expect(xml).toContain(">-</t>");
@@ -88,7 +89,7 @@ describe("OOXML workbook exports", () => {
       }),
     ];
 
-    const archive = await unzipWorkbook(buildExcelBlob(rows, excelOptions));
+    const archive = await unzipWorkbook(await buildExcelBlob(rows, excelOptions));
     const xml = strFromU8(archive["xl/worksheets/sheet1.xml"]);
     expect(xml.indexOf("FIRST-ROOM")).toBeLessThan(xml.indexOf("SECOND-ROOM"));
     expect(xml.indexOf("First person")).toBeLessThan(xml.indexOf("Second person"));
@@ -132,5 +133,12 @@ describe("export utility boundaries", () => {
 
     expect(blob.type).toBe("image/png");
     expect(Array.from(new Uint8Array(await blob.arrayBuffer()))).toEqual([0, 1, 2, 255]);
+  });
+
+  it("caps image export at 2x and twelve megapixels", () => {
+    expect(exportPixelRatio(1_200, 630)).toBe(2);
+    expect(exportPixelRatio(4_000, 3_000)).toBe(1);
+    expect(exportPixelRatio(6_000, 4_000)).toBeCloseTo(Math.sqrt(0.5));
+    expect(exportPixelRatio(0, 0)).toBe(2);
   });
 });

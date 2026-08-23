@@ -117,8 +117,9 @@ describe("generateAssignment", () => {
       false,
     );
 
-    expect(assignments.find(({ person: name }) => name === "Alice")?.rooms).toEqual(["N203"]);
-    expect(assignments.find(({ person: name }) => name === "Bob")?.rooms).toEqual(["N201", "N202"]);
+    expect(assignments.find(({ person: name }) => name === "Alice")?.rooms).toHaveLength(1);
+    expect(assignments.find(({ person: name }) => name === "Bob")?.rooms).toHaveLength(2);
+    expect(assignments.find(({ person: name }) => name === "Alice")?.rooms).not.toEqual(["N201", "N202"]);
   });
 
   it("keeps Hepburn He away from Grade 12 forms when another person is eligible", () => {
@@ -149,6 +150,65 @@ describe("generateAssignment", () => {
     expect(assignments.every((assignment) =>
       assignment.rooms.length === 1 || personByName.get(assignment.person)?.canDouble,
     )).toBe(true);
+  });
+
+  it("never assigns more than two rooms to one double-duty person", () => {
+    const people = [person("Hepburn He"), person("Alex")];
+    const rooms = [
+      room("N201", "11A"),
+      room("N202", "12A"),
+      room("N203", "11B"),
+      room("N204", "12B"),
+    ];
+
+    const assignments = generateAssignment(people, rooms, null, false);
+    const roomCounts = new Map(assignments.map((assignment) => [assignment.person, assignment.rooms.length]));
+
+    expect(assignments.flatMap((assignment) => assignment.rooms).sort()).toEqual(rooms.map((item) => item.id).sort());
+    expect(Math.max(...roomCounts.values())).toBe(2);
+    expect(roomCounts.get("Hepburn He")).toBe(2);
+    expect(roomCounts.get("Alex")).toBe(2);
+  });
+
+  it("keeps two-room assignments close when a count-preserving room swap improves them", () => {
+    const assignments = generateAssignment(
+      [person("Alice"), person("Bob")],
+      [room("N201", "9A"), room("S201", "9B"), room("N202", "9C"), room("S202", "9D")],
+      null,
+      false,
+    );
+
+    expect(assignments).toEqual([
+      { person: "Alice", rooms: ["N201", "N202"] },
+      { person: "Bob", rooms: ["S201", "S202"] },
+    ]);
+  });
+
+  it("preserves coverage, uniqueness, eligibility, and the two-room ceiling across varied staffing", () => {
+    for (let scenario = 0; scenario < 120; scenario++) {
+      const people = Array.from({ length: 1 + (scenario % 6) }, (_, index) => person(
+        index === 0 && scenario % 5 === 0 ? "Hepburn He" : `Person ${index}`,
+        (scenario + index) % 3 !== 0,
+      ));
+      const rooms = Array.from({ length: 1 + (scenario % 9) }, (_, index) => room(
+        `N${String(101 + index).padStart(3, "0")}`,
+        (scenario + index) % 4 === 0 ? `12${index}` : `9${index}`,
+      ));
+      const summary = getGenerationSummary(people, rooms);
+      const assignments = generateAssignment(people, rooms, null, false);
+      if (!summary.feasible) continue;
+
+      const assignedRooms = assignments.flatMap((assignment) => assignment.rooms);
+      expect(assignedRooms.slice().sort(), `coverage in scenario ${scenario}`).toEqual(rooms.map((item) => item.id).sort());
+      expect(new Set(assignedRooms).size, `unique rooms in scenario ${scenario}`).toBe(rooms.length);
+      for (const assignment of assignments) {
+        const assignedPerson = people.find((item) => item.name === assignment.person);
+        expect(assignment.rooms.length, `capacity in scenario ${scenario}`).toBeLessThanOrEqual(assignedPerson?.canDouble ? 2 : 1);
+        if (assignment.person === "Hepburn He") {
+          expect(assignment.rooms.some((id) => rooms.find((item) => item.id === id)?.form?.startsWith("12"))).toBe(false);
+        }
+      }
+    }
   });
 
   it("returns an empty assignment when there are no active people", () => {

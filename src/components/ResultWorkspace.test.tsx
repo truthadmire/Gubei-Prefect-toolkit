@@ -52,6 +52,7 @@ function renderWorkspace(overrides: Partial<ResultWorkspaceProps> = {}) {
     rowsByGrade: [{ grade: 9, rows: [aliceN201, aliceN202, bobN203] }],
     selectedSwapRoomId: null,
     generatedCode: "rota-code-123",
+    exportBusy: null,
     boardRef: createRef<HTMLDivElement>(),
     labels: {
       back: "Back",
@@ -106,6 +107,16 @@ describe("ResultWorkspace", () => {
     expect(screen.getByRole("button", { name: "Copy rota code" })).toBeVisible();
     expect(screen.getByRole("textbox", { name: "Rota code" })).toHaveValue("rota-code-123");
     expect(screen.getByRole("button", { name: "Copy rota code" })).toHaveClass("button--secondary");
+  });
+
+  it("marks export actions busy and prevents duplicate export requests", () => {
+    renderWorkspace({ exportBusy: "jpg" });
+
+    const actions = screen.getByRole("region", { name: "Rota actions" });
+    expect(actions).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("button", { name: "Download JPG" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Share" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Download Excel" })).toBeDisabled();
   });
 
   it("uses supplied grade and code labels for a localized result", () => {
