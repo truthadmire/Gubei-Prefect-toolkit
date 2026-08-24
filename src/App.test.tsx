@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { GENERATION_HISTORY_KEY } from "./lib/history";
-import { packRotaCodeV2 } from "./lib/rota";
 
 const toJpegMock = vi.hoisted(() => (
   vi.fn<(node: HTMLElement) => Promise<string>>().mockResolvedValue("data:image/jpeg;base64,AAEC")
@@ -57,7 +56,6 @@ async function generateResult({ disableBobDouble = false } = {}) {
   }
   await user.click(screen.getByRole("button", { name: "Generate rota" }));
   await screen.findByRole("region", { name: "Morning briefing" });
-  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Rota code copied"));
   return user;
 }
 
@@ -94,6 +92,7 @@ describe("App editorial setup workspace", () => {
     expect(screen.getByLabelText("Announcement title")).toBeVisible();
     expect(screen.getByText("Announcement date")).toBeVisible();
     expect(screen.getByLabelText("Announcement date")).toBeVisible();
+    expect(screen.queryByLabelText("Previous rota code")).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /get started/i })).not.toBeInTheDocument();
     expect(document.documentElement.lang).toBe("en");
   });
@@ -117,7 +116,7 @@ describe("App editorial setup workspace", () => {
     }
   });
 
-  it("searches device history, shows sync state, and clears only this device", async () => {
+  it("loads database-ready history directly, searches it, and clears only this device", async () => {
     const savedAt = new Date().toISOString();
     window.localStorage.setItem(GENERATION_HISTORY_KEY, JSON.stringify([{
       id: "40fdf22f-b96c-46a7-b575-dbd1e06d23f2",
@@ -135,6 +134,11 @@ describe("App editorial setup workspace", () => {
 
     expect(screen.getByRole("option", { name: /Assembly duty.*Waiting to share/ })).toBeVisible();
     expect(screen.getByText("Waiting to share")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Load" }));
+    expect(screen.getByLabelText("Announcement title")).toHaveValue("Assembly duty");
+    expect(screen.getByLabelText("Announcement date")).toHaveValue(savedAt.slice(0, 10));
+    expect(screen.getByRole("status")).toHaveTextContent("History applied to the next rota");
+    expect(screen.queryByLabelText("Previous rota code")).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("Search history"), "no match");
     expect(screen.getByText("No matching history")).toBeVisible();
     await user.clear(screen.getByLabelText("Search history"));
@@ -287,42 +291,6 @@ describe("App editorial setup workspace", () => {
     expect(alertSpy).not.toHaveBeenCalled();
   });
 
-  it("keeps selections unchanged and announces an invalid imported code", async () => {
-    const user = await renderReady();
-    const bobSelected = screen.getByRole("checkbox", { name: "Bob Zhang Selected" });
-    const form9C = screen.getByRole("button", { name: "9C" });
-    await user.click(bobSelected);
-    await user.click(form9C);
-
-    fireEvent.change(screen.getByLabelText("Previous rota code"), { target: { value: "not-a-rota-code" } });
-    await user.click(screen.getByRole("button", { name: "Apply code" }));
-
-    const status = screen.getByRole("status");
-    await waitFor(() => expect(status).toHaveTextContent("Invalid or incompatible rota code"));
-    expect(bobSelected).not.toBeChecked();
-    expect(form9C).toHaveAttribute("aria-pressed", "false");
-    expect(screen.getByRole("checkbox", { name: "Alice Chen Selected" })).toBeChecked();
-    expect(status).toHaveAttribute("aria-live", "polite");
-    expect(status).toHaveAttribute("aria-atomic", "true");
-  });
-
-  it("imports history only after Apply code and can explicitly clear it", async () => {
-    const user = await renderReady();
-    const code = await packRotaCodeV2({
-      date: "2026-07-10",
-      assignments: [{ person: "Alice Chen", rooms: ["N201"] }],
-    });
-
-    fireEvent.change(screen.getByLabelText("Previous rota code"), { target: { value: code } });
-    expect(screen.getByRole("status")).not.toHaveTextContent("Imported last rota code");
-
-    await user.click(screen.getByRole("button", { name: "Apply code" }));
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Imported last rota code"));
-
-    await user.click(screen.getByRole("button", { name: "Clear imported history" }));
-    expect(screen.getByRole("status")).toHaveTextContent("Imported assignment history cleared");
-  });
-
   it("updates one stable local history session after a result swap", async () => {
     const user = await generateResult();
     await waitFor(() => {
@@ -421,15 +389,6 @@ describe("App editorial setup workspace", () => {
     expect(screen.getByRole("status")).not.toHaveTextContent("Choose a different row to swap.");
   });
 
-  it("announces clipboard unavailability when rota-code copy is unsupported", async () => {
-    const user = await generateResult();
-    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
-
-    await user.click(screen.getByRole("button", { name: "Copy rota code" }));
-
-    expect(screen.getByRole("status")).toHaveTextContent("Clipboard is unavailable on this device.");
-  });
-
   it("announces unavailable sharing when neither native share nor image copy is supported", async () => {
     const user = await generateResult();
     Object.defineProperty(navigator, "canShare", { configurable: true, value: undefined });
@@ -526,6 +485,7 @@ describe("App editorial setup workspace", () => {
 
     expect(within(board).getByText("值勤排布单")).toBeVisible();
     expect(screen.getByRole("region", { name: "排布操作" })).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "排布码" })).not.toBeInTheDocument();
     expect(screen.queryByText("Prefect rota / Assignment sheet")).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Rota actions" })).not.toBeInTheDocument();
     expect(document.documentElement.lang).toBe("zh-CN");

@@ -11,7 +11,6 @@ export type ResultWorkspaceProps = {
   dragHint: string;
   rowsByGrade: Array<{ grade: number; rows: ResultRow[] }>;
   selectedSwapRoomId: string | null;
-  generatedCode: string;
   exportBusy: "jpg" | "share" | "excel" | null;
   boardRef: RefObject<HTMLDivElement | null>;
   labels: {
@@ -19,9 +18,7 @@ export type ResultWorkspaceProps = {
     downloadJpg: string;
     share: string;
     downloadExcel: string;
-    copyCode: string;
     gradeTitle?: (grade: number) => string;
-    codeTitle?: string;
     assignmentSheet?: string;
     actionsLabel?: string;
     unassigned?: string;
@@ -31,7 +28,6 @@ export type ResultWorkspaceProps = {
   onDownloadJpg: () => void;
   onShare: () => void;
   onDownloadExcel: () => void;
-  onCopyCode: () => void;
   onDragStart: (roomId: string) => void;
   onDrop: (roomId: string) => void;
   onDragEnd: () => void;
@@ -48,7 +44,6 @@ export default function ResultWorkspace({
   dragHint,
   rowsByGrade,
   selectedSwapRoomId,
-  generatedCode,
   exportBusy,
   boardRef,
   labels,
@@ -57,7 +52,6 @@ export default function ResultWorkspace({
   onDownloadJpg,
   onShare,
   onDownloadExcel,
-  onCopyCode,
   onDragStart,
   onDrop,
   onDragEnd,
@@ -65,7 +59,6 @@ export default function ResultWorkspace({
   const previousPeople = useRef<Map<string, string> | null>(null);
   const clearAnimationTimer = useRef<number | null>(null);
   const [changedRoomIds, setChangedRoomIds] = useState<Set<string>>(new Set());
-  const codeTitle = labels.codeTitle || "Rota code";
   const assignmentSheet = labels.assignmentSheet || "Prefect rota / Assignment sheet";
   const actionsLabel = labels.actionsLabel || "Rota actions";
   const unassigned = labels.unassigned || "Unassigned";
@@ -196,23 +189,6 @@ export default function ResultWorkspace({
         <button type="button" className="button button--primary" disabled={exportBusy !== null} aria-disabled={exportBusy !== null} onClick={onDownloadJpg}>{labels.downloadJpg}</button>
         <button type="button" className="button button--secondary" disabled={exportBusy !== null} aria-disabled={exportBusy !== null} onClick={onShare}>{labels.share}</button>
         <button type="button" className="button button--secondary" disabled={exportBusy !== null} aria-disabled={exportBusy !== null} onClick={onDownloadExcel}>{labels.downloadExcel}</button>
-      </section>
-
-      <section className="result-code sheet" aria-labelledby="result-code-title">
-        <div className="result-code__heading">
-          <h2 id="result-code-title">{codeTitle}</h2>
-          <button type="button" className="button button--secondary" onClick={onCopyCode}>{labels.copyCode}</button>
-        </div>
-        <label className="field">
-          <span>{codeTitle}</span>
-          <textarea
-            className="mono-input result-code__value"
-            aria-label={codeTitle}
-            readOnly
-            value={generatedCode}
-            onFocus={(event) => event.currentTarget.select()}
-          />
-        </label>
       </section>
     </main>
   );

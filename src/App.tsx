@@ -18,7 +18,6 @@ import {
   parseRoomId,
   randomSeed,
   swapAssignments,
-  unpackRotaCodeCompat,
   validateGeneration,
 } from "./lib/rota";
 import type { GenerationFailure, GenerationSummary, SwapResult } from "./lib/rota";
@@ -145,9 +144,6 @@ export default function App() {
   const generateButtonRef = useRef<HTMLButtonElement>(null);
   const [dragRoomId, setDragRoomId] = useState<string | null>(null);
   const [selectedSwapRoomId, setSelectedSwapRoomId] = useState<string | null>(null);
-  const [rotaCodeIn, setRotaCodeIn] = useState("");
-  const [importBusy, setImportBusy] = useState(false);
-  const importRequest = useRef(0);
   const [allowedForms, setAllowedForms] = useState<Set<string>>(new Set());
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const boardRef = useRef<HTMLDivElement>(null);
@@ -159,7 +155,10 @@ export default function App() {
   const [sharedHistory, setSharedHistory] = useState<GenerationHistoryItem[]>([]);
   const [sharedHistoryCursor, setSharedHistoryCursor] = useState<string | null>(null);
   const [sharedHistoryLoading, setSharedHistoryLoading] = useState(false);
+  const [sharedHistoryOffline, setSharedHistoryOffline] = useState(false);
+  const sharedHistoryLoadingRef = useRef(false);
   const sharedHistoryStarted = useRef(false);
+  const sharedHistoryOfflineRef = useRef(false);
   const autoPublishStarted = useRef(false);
   const syncRunning = useRef(false);
   const syncTimer = useRef<number | null>(null);
@@ -173,7 +172,6 @@ export default function App() {
   const generationRevision = useRef(0);
   const [selectedHistoryId, setSelectedHistoryId] = useState("");
 
-  const [generatedCode, setGeneratedCode] = useState("");
   const [exportBusy, setExportBusy] = useState<"jpg" | "share" | "excel" | null>(null);
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null);
   const showToast = (text: string, ms = 2000) => {
@@ -246,39 +244,16 @@ export default function App() {
     };
   }, [rosterAttempt]);
 
-  function changeRotaCode(value: string) {
-    importRequest.current += 1;
-    setImportBusy(false);
-    setRotaCodeIn(value);
-  }
-
-  async function applyPreviousCode() {
-    const code = rotaCodeIn.trim();
-    if (!code || !people.length) return;
-    const request = ++importRequest.current;
-    setImportBusy(true);
-    try {
-      const payload = await unpackRotaCodeCompat(code);
-      if (request !== importRequest.current) return;
-      setPeople((current) => applyImportedAssignments(current, payload.assignments));
-      showToast(L.importOk);
-    } catch (error) {
-      if (request !== importRequest.current) return;
-      console.warn(error);
-      showToast(L.importFail);
-    } finally {
-      if (request === importRequest.current) setImportBusy(false);
-    }
-  }
-
-  function clearImportedAssignments() {
-    importRequest.current += 1;
-    setImportBusy(false);
-    setPeople((current) => current.map((person) => {
-      const { lastRooms: _lastRooms, lastPairKey: _lastPairKey, ...rest } = person;
-      return rest;
-    }));
-    showToast(L.importCleared);
+  function applyHistoryAssignments(nextAssignments: Assignment[]) {
+    setPeople((current) => applyImportedAssignments(
+      current.map((person) => {
+        const next = { ...person };
+        delete next.lastRooms;
+        delete next.lastPairKey;
+        return next;
+      }),
+      nextAssignments,
+    ));
   }
 
   const combinedHistory = useMemo(
@@ -292,6 +267,12 @@ export default function App() {
       return combinedHistory[0]?.id || "";
     });
   }, [combinedHistory]);
+
+  useEffect(() => {
+    if (SHARED_HISTORY_ENABLED || !clientStateHydrated || rosterState !== "ready") return;
+    const latestLocalHistory = generationHistoryRef.current[0];
+    if (latestLocalHistory) applyHistoryAssignments(latestLocalHistory.assignments);
+  }, [clientStateHydrated, rosterState]);
 
   function replaceLocalHistory(items: GenerationHistoryItem[]) {
     generationHistoryRef.current = items;
@@ -363,7 +344,6 @@ export default function App() {
 
   async function finalizeCurrentGeneration(
     nextAssignments: Assignment[],
-    copyAfterGeneration: boolean,
     syncDelayMs: number,
   ) {
     const session = currentGeneration.current;
@@ -372,7 +352,7 @@ export default function App() {
     const code = await packRotaCodeV2({ date: session.date, assignments: nextAssignments });
     if (currentGeneration.current !== session || revision !== generationRevision.current) return;
 
-    setGeneratedCode(code);
+    applyHistoryAssignments(nextAssignments);
     const existing = generationHistoryRef.current.find((item) => item.id === session.id);
     const now = new Date().toISOString();
     storeGenerationHistoryItem({
@@ -392,22 +372,11 @@ export default function App() {
       source: "device",
       syncStatus: existing?.syncStatus || "local",
     }, syncDelayMs);
-
-    if (copyAfterGeneration) {
-      const clipboard = navigator.clipboard;
-      if (!clipboard?.writeText) {
-        showToast(L.clipboardUnavailable);
-      } else {
-        clipboard.writeText(code).then(
-          () => showToast(L.copyOk),
-          () => showToast(L.copyFail),
-        );
-      }
-    }
   }
 
   async function loadNextSharedHistoryPage(reset = false) {
-    if (!SHARED_HISTORY_ENABLED || sharedHistoryLoading) return;
+    if (!SHARED_HISTORY_ENABLED || sharedHistoryLoadingRef.current) return;
+    sharedHistoryLoadingRef.current = true;
     setSharedHistoryLoading(true);
     try {
       const page = await fetchSharedHistoryPage(reset ? null : sharedHistoryCursor);
@@ -415,23 +384,37 @@ export default function App() {
         ? page.items
         : mergeLocalAndSharedHistory(current, page.items));
       setSharedHistoryCursor(page.nextCursor);
+      sharedHistoryOfflineRef.current = false;
+      setSharedHistoryOffline(false);
+      const latestHistory = page.items[0] || generationHistoryRef.current[0];
+      if (reset && latestHistory) applyHistoryAssignments(latestHistory.assignments);
     } catch {
-      // Shared history is additive; setup remains fully usable from local state.
+      sharedHistoryOfflineRef.current = true;
+      setSharedHistoryOffline(true);
+      const latestLocalHistory = generationHistoryRef.current[0];
+      if (reset && latestLocalHistory) applyHistoryAssignments(latestLocalHistory.assignments);
+      showToast(L.historyOffline, 5_000);
     } finally {
+      sharedHistoryLoadingRef.current = false;
       setSharedHistoryLoading(false);
     }
   }
 
   useEffect(() => {
     if (!SHARED_HISTORY_ENABLED || !clientStateHydrated) return;
-    const onOnline = () => scheduleSharedHistorySync(0);
+    const onOnline = () => {
+      scheduleSharedHistorySync(0);
+      if (rosterState === "ready" && sharedHistoryOfflineRef.current) {
+        void loadNextSharedHistoryPage(true);
+      }
+    };
     window.addEventListener("online", onOnline);
     scheduleSharedHistorySync(0);
     return () => {
       window.removeEventListener("online", onOnline);
       if (syncTimer.current !== null) window.clearTimeout(syncTimer.current);
     };
-  }, [clientStateHydrated]);
+  }, [clientStateHydrated, rosterState]);
 
   useEffect(() => {
     if (!SHARED_HISTORY_ENABLED || !clientStateHydrated || !rosterRevision || autoPublishStarted.current) return;
@@ -462,7 +445,7 @@ export default function App() {
     if (!selected) return;
     setTitle(selected.title);
     setDateStr(selected.date);
-    changeRotaCode(selected.code);
+    applyHistoryAssignments(selected.assignments);
     showToast(L.historyLoaded);
   }
 
@@ -572,21 +555,7 @@ export default function App() {
     generationRevision.current += 1;
     setAssignments(A);
     setStep(2);
-    void finalizeCurrentGeneration(A, true, 0);
-  }
-
-  async function copyCode() {
-    const clipboard = navigator.clipboard;
-    if (!clipboard?.writeText) {
-      showToast(L.clipboardUnavailable);
-      return;
-    }
-    try {
-      await clipboard.writeText(generatedCode);
-      showToast(L.copyOk);
-    } catch {
-      showToast(L.copyFail);
-    }
+    void finalizeCurrentGeneration(A, 0);
   }
 
   function swapAssignmentsByRoom(sourceRoomId: string, targetRoomId: string) {
@@ -599,7 +568,7 @@ export default function App() {
     }
 
     setAssignments(result.assignments);
-    void finalizeCurrentGeneration(result.assignments, false, 500);
+    void finalizeCurrentGeneration(result.assignments, 500);
     showToast(L.dragUpdated);
   }
 
@@ -928,10 +897,10 @@ export default function App() {
           copy={L}
           title={title}
           date={dateStr}
-          rotaCode={rotaCodeIn}
           history={combinedHistory}
           historyHasMore={sharedHistoryCursor !== null}
           historyLoading={sharedHistoryLoading}
+          historyOffline={sharedHistoryOffline}
           sharedHistoryEnabled={SHARED_HISTORY_ENABLED}
           selectedHistoryId={selectedHistoryId}
           personGroups={personGroups}
@@ -942,14 +911,11 @@ export default function App() {
           generateButtonRef={generateButtonRef}
           onTitleChange={setTitle}
           onDateChange={setDateStr}
-          importBusy={importBusy}
-          onRotaCodeChange={changeRotaCode}
-          onRotaCodeApply={applyPreviousCode}
-          onImportedHistoryClear={clearImportedAssignments}
           onHistorySelectionChange={setSelectedHistoryId}
           onHistoryLoad={loadSelectedHistory}
           onHistoryClear={clearGenerationHistory}
           onHistoryLoadMore={() => void loadNextSharedHistoryPage(false)}
+          onHistoryRetry={() => void loadNextSharedHistoryPage(true)}
           onPersonToggle={togglePerson}
           onDoubleToggle={toggleDouble}
           onFormToggle={toggleForm}
@@ -966,7 +932,6 @@ export default function App() {
           dragHint={L.dragHint}
           rowsByGrade={resultRowsByGrade}
           selectedSwapRoomId={selectedSwapRoomId}
-          generatedCode={generatedCode}
           exportBusy={exportBusy}
           boardRef={boardRef}
           labels={{
@@ -974,9 +939,7 @@ export default function App() {
             downloadJpg: L.download,
             share: L.exportShare,
             downloadExcel: L.downloadExcel,
-            copyCode: L.copy,
             gradeTitle: L.gradeTitle,
-            codeTitle: L.codeBoxTitle,
             assignmentSheet: L.assignmentSheet,
             actionsLabel: L.actionsLabel,
             unassigned: L.unassigned,
@@ -986,7 +949,6 @@ export default function App() {
           onDownloadJpg={downloadImage}
           onShare={shareImage}
           onDownloadExcel={downloadExcel}
-          onCopyCode={copyCode}
           onDragStart={setDragRoomId}
           onDrop={(targetRoomId) => {
             if (dragRoomId) swapAssignmentsByRoom(dragRoomId, targetRoomId);

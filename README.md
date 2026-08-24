@@ -8,6 +8,8 @@ The application uses React, TypeScript, Next.js on Vercel, and Vinext/Vite for t
 
 Shared history is intentionally public and anonymous: when enabled, every successfully generated rota publishes its title, date, rota code, and assignments to a feed that anyone can read. Records expire after 90 days and the feed is capped at 200 records. There is no public delete endpoint; “Clear this device” removes only local data and the device-held edit capability.
 
+The client fetches the newest shared record automatically and uses its assignments as the next generation's anti-repeat history. If that request fails, the setup screen switches to a visible offline state without blocking generation; new rotas stay in the device outbox and retry automatically when connectivity returns. Rota codes remain an internal compatibility field for existing API and database records and are not exposed as a manual paste/copy workflow.
+
 The default configuration is local-only. To enable the public feed:
 
 1. Create a Neon Postgres integration through Vercel Marketplace and expose its `DATABASE_URL` to the project.

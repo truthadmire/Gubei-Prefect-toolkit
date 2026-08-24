@@ -15,10 +15,10 @@ type SetupWorkspaceProps = {
   copy: AppCopy;
   title: string;
   date: string;
-  rotaCode: string;
   history: GenerationHistoryItem[];
   historyHasMore: boolean;
   historyLoading: boolean;
+  historyOffline: boolean;
   sharedHistoryEnabled: boolean;
   selectedHistoryId: string;
   personGroups: PersonGroup[];
@@ -26,17 +26,14 @@ type SetupWorkspaceProps = {
   allowedForms: Set<string>;
   summary: GenerationSummary;
   canGenerate: boolean;
-  importBusy: boolean;
   generateButtonRef: React.RefObject<HTMLButtonElement | null>;
   onTitleChange: (value: string) => void;
   onDateChange: (value: string) => void;
-  onRotaCodeChange: (value: string) => void;
-  onRotaCodeApply: () => void;
-  onImportedHistoryClear: () => void;
   onHistorySelectionChange: (id: string) => void;
   onHistoryLoad: () => void;
   onHistoryClear: () => void;
   onHistoryLoadMore: () => void;
+  onHistoryRetry: () => void;
   onPersonToggle: (id: string) => void;
   onDoubleToggle: (id: string) => void;
   onFormToggle: (form: string) => void;
@@ -48,10 +45,10 @@ export default function SetupWorkspace({
   copy,
   title,
   date,
-  rotaCode,
   history,
   historyHasMore,
   historyLoading,
+  historyOffline,
   sharedHistoryEnabled,
   selectedHistoryId,
   personGroups,
@@ -59,17 +56,14 @@ export default function SetupWorkspace({
   allowedForms,
   summary,
   canGenerate,
-  importBusy,
   generateButtonRef,
   onTitleChange,
   onDateChange,
-  onRotaCodeChange,
-  onRotaCodeApply,
-  onImportedHistoryClear,
   onHistorySelectionChange,
   onHistoryLoad,
   onHistoryClear,
   onHistoryLoadMore,
+  onHistoryRetry,
   onPersonToggle,
   onDoubleToggle,
   onFormToggle,
@@ -269,40 +263,22 @@ export default function SetupWorkspace({
         <section className="sheet restore-sheet" aria-labelledby="restore-heading">
           <p className="sheet-kicker">02 / Restore</p>
           <h2 id="restore-heading">{copy.restoreTitle}</h2>
-          <label className="field" htmlFor="previous-rota-code">
-            <span>{copy.previousCodeLabel}</span>
-            <input
-              id="previous-rota-code"
-              className="mono-input"
-              aria-label={copy.previousCodeLabel}
-              value={rotaCode}
-              placeholder={copy.lastCodePh}
-              onChange={(event) => onRotaCodeChange(event.target.value)}
-            />
-            <small>{copy.previousCodeHint}</small>
-          </label>
-          <div className="history-actions" aria-busy={importBusy}>
-            <button
-              type="button"
-              className="button button--secondary"
-              disabled={!rotaCode.trim() || importBusy}
-              aria-disabled={!rotaCode.trim() || importBusy}
-              onClick={onRotaCodeApply}
-            >
-              {importBusy ? copy.importApplying : copy.importApply}
-            </button>
-            <button
-              type="button"
-              className="button button--quiet"
-              disabled={importBusy}
-              aria-disabled={importBusy}
-              onClick={onImportedHistoryClear}
-            >
-              {copy.importClear}
-            </button>
-          </div>
+          <p className="section-hint restore-hint">{copy.historyAutomatic}</p>
           {(history.length > 0 || sharedHistoryEnabled) && (
             <div className="history-controls history-browser" aria-busy={historyLoading}>
+              {historyOffline && (
+                <div className="history-offline" role="status" aria-live="polite">
+                  <p>{copy.historyOffline}</p>
+                  <button
+                    type="button"
+                    className="button button--quiet"
+                    disabled={historyLoading}
+                    onClick={onHistoryRetry}
+                  >
+                    {historyLoading ? copy.historyLoading : copy.historyRetry}
+                  </button>
+                </div>
+              )}
               <div className="history-browser__filters">
                 <label className="field" htmlFor="history-search">
                   <span>{copy.historySearch}</span>

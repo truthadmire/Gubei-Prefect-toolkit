@@ -39,7 +39,6 @@ function renderWorkspace(overrides: Partial<ResultWorkspaceProps> = {}) {
     onDownloadJpg: vi.fn(),
     onShare: vi.fn(),
     onDownloadExcel: vi.fn(),
-    onCopyCode: vi.fn(),
     onDragStart: vi.fn(),
     onDrop: vi.fn(),
     onDragEnd: vi.fn(),
@@ -51,7 +50,6 @@ function renderWorkspace(overrides: Partial<ResultWorkspaceProps> = {}) {
     dragHint: "Drag or choose two rows to swap.",
     rowsByGrade: [{ grade: 9, rows: [aliceN201, aliceN202, bobN203] }],
     selectedSwapRoomId: null,
-    generatedCode: "rota-code-123",
     exportBusy: null,
     boardRef: createRef<HTMLDivElement>(),
     labels: {
@@ -59,7 +57,6 @@ function renderWorkspace(overrides: Partial<ResultWorkspaceProps> = {}) {
       downloadJpg: "Download JPG",
       share: "Share",
       downloadExcel: "Download Excel",
-      copyCode: "Copy rota code",
     },
     ...callbacks,
     ...overrides,
@@ -97,16 +94,15 @@ describe("ResultWorkspace", () => {
     expect(screen.getByRole("button", { name: /N203.*Bob Zhang.*Charity/i })).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("renders all result actions and a readable labeled rota code", () => {
+  it("renders all result actions without exposing a manual rota-code control", () => {
     renderWorkspace();
 
     expect(screen.getByRole("button", { name: "Back" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Download JPG" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Share" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Download Excel" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Copy rota code" })).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "Rota code" })).toHaveValue("rota-code-123");
-    expect(screen.getByRole("button", { name: "Copy rota code" })).toHaveClass("button--secondary");
+    expect(screen.queryByRole("button", { name: "Copy rota code" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Rota code" })).not.toBeInTheDocument();
   });
 
   it("marks export actions busy and prevents duplicate export requests", () => {
@@ -128,15 +124,12 @@ describe("ResultWorkspace", () => {
         downloadJpg: "下载图片",
         share: "分享",
         downloadExcel: "下载 Excel",
-        copyCode: "复制排布码",
         gradeTitle: (grade: number) => `${grade} 年级`,
-        codeTitle: "排布码",
         assignmentSheet: "值勤排布单",
         actionsLabel: "排布操作",
         unassigned: "未安排",
       } as ResultWorkspaceProps["labels"] & {
         gradeTitle: (grade: number) => string;
-        codeTitle: string;
         assignmentSheet: string;
         actionsLabel: string;
         unassigned: string;
@@ -144,8 +137,8 @@ describe("ResultWorkspace", () => {
     });
 
     expect(screen.getByRole("heading", { name: "9 年级" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "排布码" })).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "排布码" })).toHaveValue("rota-code-123");
+    expect(screen.queryByRole("heading", { name: "排布码" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "排布码" })).not.toBeInTheDocument();
     expect(screen.getByText("值勤排布单")).toBeVisible();
     expect(screen.getByRole("region", { name: "排布操作" })).toBeVisible();
     expect(screen.getByLabelText("N204 (9D), 未安排")).toBeVisible();
